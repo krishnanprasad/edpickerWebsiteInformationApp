@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SchoolLens API UI</title>
+    <style>
+      body { font-family: Arial, sans-serif; max-width: 900px; margin: 30px auto; padding: 0 16px; }
+      .card { border: 1px solid #ddd; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+      input, button, textarea { font-size: 16px; padding: 10px; }
+      input, textarea { width: 100%; box-sizing: border-box; margin-bottom: 10px; }
+      .muted { color: #666; }
+    </style>
+  </head>
+  <body>
+    <h1>SchoolLens (TypeScript API UI)</h1>
+    <p class="muted">Angular app lives in <code>apps/web</code>. This page is fallback UI for API smoke testing.</p>
+
+    <div class="card">
+      <h3>Scan URL</h3>
+      <input id="urlInput" type="url" placeholder="https://example-school.edu" />
+      <button id="scanBtn">Scan</button>
+      <p id="scanStatus" class="muted"></p>
+    </div>
+
+    <div class="card" id="chatCard" style="display:none;">
+      <h3>Ask Question</h3>
+      <textarea id="questionInput" rows="3" placeholder="What is missing on our website?"></textarea>
+      <button id="askBtn">Ask</button>
+      <p id="answer" class="muted"></p>
+    </div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
