@@ -1,0 +1,18 @@
+{
+  "name": "crawler",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "apps/crawler/src",
+  "projectType": "application",
+  "targets": {
+    "dev": {
+      "command": "npm --workspace apps/crawler run dev"
+    },
+    "build": {
+      "command": "npm --workspace apps/crawler run build"
+    },
+    "start": {
+      "command": "npm --workspace apps/crawler run start"
+    }
+  },
+  "tags": ["scope:crawler", "type:worker"]
+}
