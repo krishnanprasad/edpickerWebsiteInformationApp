@@ -1,0 +1,20 @@
+{
+  "/api/scan/*/events": {
+    "target": "https://schoollens-api-268163136000.asia-south2.run.app",
+    "secure": true,
+    "changeOrigin": true,
+    "headers": {
+      "Connection": "keep-alive"
+    }
+  },
+  "/api": {
+    "target": "https://schoollens-api-268163136000.asia-south2.run.app",
+    "secure": true,
+    "changeOrigin": true
+  },
+  "/internal": {
+    "target": "https://schoollens-api-268163136000.asia-south2.run.app",
+    "secure": true,
+    "changeOrigin": true
+  }
+}

@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "ng serve",
+    "dev:cloud": "ng serve --proxy-config proxy.cloudrun.conf.json",
     "build": "ng build",
     "ssr": "node dist/web/server/server.mjs"
   },

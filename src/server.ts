@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import 'express-async-errors';
 import crypto from 'node:crypto';
 import express from 'express';
 import { Queue } from 'bullmq';
@@ -1137,9 +1138,29 @@ app.post('/api/storage/badge/:sessionId', async (req, res) => {
 });
 
 app.get('/api/health', async (_req, res) => {
-  await pgPool.query('SELECT 1');
-  await redis.ping();
-  res.json({
+  try {
+    await pgPool.query('SELECT 1');
+  } catch (error) {
+    return res.status(503).json({
+      ok: false,
+      dependency: 'postgres',
+      message: 'Postgres connectivity check failed',
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  try {
+    await redis.ping();
+  } catch (error) {
+    return res.status(503).json({
+      ok: false,
+      dependency: 'redis',
+      message: 'Redis connectivity check failed',
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  return res.json({
     ok: true,
     openAiConfigured: Boolean(process.env.OPENAI_API_KEY),
     queue: {
@@ -1148,6 +1169,14 @@ app.get('/api/health', async (_req, res) => {
       score: process.env.SCORING_QUEUE_NAME || 'schoollens-score',
     },
     storageProvider: process.env.STORAGE_PROVIDER || 's3',
+  });
+});
+
+app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error(err);
+  res.status(500).json({
+    ok: false,
+    error: 'Internal server error',
   });
 });
 
