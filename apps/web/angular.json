@@ -10,7 +10,7 @@
         "build": {
           "builder": "@angular-devkit/build-angular:application",
           "options": {
-            "outputPath": "dist/web/browser",
+            "outputPath": "../../dist/web/browser",
             "index": "src/index.html",
             "browser": "src/main.ts",
             "polyfills": ["zone.js"],
@@ -22,10 +22,14 @@
         "serve": {
           "builder": "@angular-devkit/build-angular:dev-server",
           "options": {
-            "buildTarget": "web:build"
+            "buildTarget": "web:build",
+            "proxyConfig": "proxy.conf.json"
           }
         }
       }
     }
+  },
+  "cli": {
+    "analytics": false
   }
 }

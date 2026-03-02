@@ -1,0 +1,17 @@
+{
+  "/api/scan/*/events": {
+    "target": "http://localhost:3000",
+    "secure": false,
+    "headers": {
+      "Connection": "keep-alive"
+    }
+  },
+  "/api": {
+    "target": "http://localhost:3000",
+    "secure": false
+  },
+  "/internal": {
+    "target": "http://localhost:3000",
+    "secure": false
+  }
+}

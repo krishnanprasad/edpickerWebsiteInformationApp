@@ -1,1 +1,36 @@
-html, body { font-family: Arial, sans-serif; margin: 0; }
+@import '@angular/material/prebuilt-themes/indigo-pink.css';
+
+:root {
+  --sl-primary: #1a237e;
+  --sl-accent: #0d47a1;
+  --sl-bg: #f8f9fa;
+  --sl-card-bg: #ffffff;
+  --sl-text: #212121;
+  --sl-text-muted: #616161;
+  --sl-green: #2e7d32;
+  --sl-amber: #e65100;
+  --sl-red: #c62828;
+  --sl-blue-light: #e3f2fd;
+  --sl-green-light: #e8f5e9;
+  --sl-amber-light: #fff3e0;
+  --sl-red-light: #fce4ec;
+  --sl-radius: 12px;
+  --sl-shadow: 0 2px 8px rgba(0,0,0,0.08);
+  --sl-shadow-hover: 0 4px 16px rgba(0,0,0,0.12);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+html, body {
+  font-family: 'Roboto', Arial, sans-serif;
+  margin: 0;
+  background: var(--sl-bg);
+  color: var(--sl-text);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Hide scrollbar on category scroller */
+.hide-scrollbar::-webkit-scrollbar { display: none; }
+.hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }

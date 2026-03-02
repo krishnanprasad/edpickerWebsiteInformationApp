@@ -4,13 +4,17 @@ services:
     image: postgres:16
     environment:
       POSTGRES_USER: dev
-      POSTGRES_PASSWORD: dev
+      POSTGRES_PASSWORD: dev100
       POSTGRES_DB: edpicker-crawler-app
     ports:
       - '5432:5432'
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./sql/migrations/001_scoring_v2.sql:/docker-entrypoint-initdb.d/02-scoring-v2.sql:ro
+      - ./sql/migrations/002_early_identity.sql:/docker-entrypoint-initdb.d/03-early-identity.sql:ro
+      - ./sql/migrations/003_crawler_v2.sql:/docker-entrypoint-initdb.d/04-crawler-v2.sql:ro
+      - ./sql/migrations/004_compare_lists.sql:/docker-entrypoint-initdb.d/05-compare-lists.sql:ro
 
   redis:
     image: redis:7-alpine
@@ -30,18 +34,23 @@ services:
   api:
     image: node:20-alpine
     working_dir: /app
-    command: sh -c "npm install && npm run api:dev"
+    command: sh -c "npm install --legacy-peer-deps --no-package-lock && npx tsx src/server.ts"
     volumes:
       - ./:/app
+      - /app/node_modules
+      - /app/apps/web/node_modules
     environment:
       PORT: 3000
-      DATABASE_URL: postgresql://dev:dev@postgres:5432/edpicker-crawler-app
+      DATABASE_URL: postgresql://dev:dev100@postgres:5432/edpicker-crawler-app
       REDIS_URL: redis://redis:6379
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      CRAWLER_QUEUE_NAME: schoollens:crawl
-      SCORING_QUEUE_NAME: schoollens:score
+      CLASSIFY_QUEUE_NAME: schoollens-classify
+      CRAWLER_QUEUE_NAME: schoollens-crawl
+      SCORING_QUEUE_NAME: schoollens-score
+      EDUCATION_CONFIDENCE_THRESHOLD: 60
       INTERNAL_API_KEY: change-me
+      B2B_CTA_URL: https://edpicker.com/verify
       STORAGE_PROVIDER: s3
       STORAGE_BUCKET: schoollens-assets
       S3_ENDPOINT: http://minio:9000
@@ -56,19 +65,25 @@ services:
       - minio
 
   crawler:
-    image: node:20-alpine
+    image: mcr.microsoft.com/playwright:v1.49.0-jammy
     working_dir: /app
-    command: sh -c "npm install && npm --workspace apps/crawler run dev"
+    command: sh -c "npm install --legacy-peer-deps --no-package-lock && npx playwright install --with-deps chromium && npx tsx apps/crawler/src/worker.ts"
     volumes:
       - ./:/app
+      - /app/node_modules
+      - /app/apps/web/node_modules
     environment:
       REDIS_URL: redis://redis:6379
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      CRAWLER_QUEUE_NAME: schoollens:crawl
-      SCORING_QUEUE_NAME: schoollens:score
+      CLASSIFY_QUEUE_NAME: schoollens-classify
+      CRAWLER_QUEUE_NAME: schoollens-crawl
+      SCORING_QUEUE_NAME: schoollens-score
+      EDUCATION_CONFIDENCE_THRESHOLD: 60
       CRAWLER_API_BASE_URL: http://api:3000
       INTERNAL_API_KEY: change-me
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL_SCORING: gpt-4o-mini
     depends_on:
       - api
       - redis
