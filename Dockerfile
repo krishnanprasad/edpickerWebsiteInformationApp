@@ -9,9 +9,9 @@ COPY package.json package-lock.json ./
 COPY apps/crawler/package.json apps/crawler/
 COPY apps/web/package.json apps/web/
 
-# Install production dependencies
+# Install dependencies (include dev deps because Cloud Run worker uses tsx at runtime)
 # Note: legacy-peer-deps might be needed depending on angular versions
-RUN npm ci --omit=dev --legacy-peer-deps
+RUN npm ci --legacy-peer-deps
 
 # Copy source code
 COPY . .
