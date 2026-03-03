@@ -41,7 +41,8 @@ function resolveRedisUrl(): string {
   const cloudUrl = process.env.REDIS_URL_CLOUD || process.env.REDIS_URL;
   const url = isLocal ? (localUrl || cloudUrl) : (cloudUrl || localUrl);
   if (!url) {
-    throw new Error('REDIS_URL is required; set REDIS_URL_LOCAL / REDIS_URL_CLOUD and IS_LOCAL');
+    console.error('[BOOT][REDIS] Missing REDIS URL. Set REDIS_URL_LOCAL / REDIS_URL_CLOUD and IS_LOCAL.');
+    return 'redis://127.0.0.1:6379';
   }
   return url;
 }
@@ -70,6 +71,17 @@ http.createServer((_req, res) => {
 }).listen(WORKER_PORT, () => {
   console.log(`Worker health server listening on ${WORKER_PORT}`);
 });
+
+function maskConnectionString(value?: string): string {
+  if (!value) return '(missing)';
+  try {
+    const parsed = new URL(value);
+    if (parsed.password) parsed.password = '***';
+    return parsed.toString();
+  } catch {
+    return '(invalid-url)';
+  }
+}
 
 /* ------------------------------------------------------------------ */
 /*  Education keywords + categories (for classification)               */
@@ -106,6 +118,92 @@ function post(path: string, body: Record<string, unknown>, timeout = 20_000) {
     headers: { 'X-Internal-Key': internalApiKey },
     timeout,
   });
+}
+
+async function runStartupDiagnostics() {
+  const startedAt = Date.now();
+  const redisUrl = resolveRedisUrl();
+
+  console.log('[DIAG] ===== Startup Diagnostics =====');
+  console.log('[DIAG][ENV]', {
+    node: process.version,
+    port: WORKER_PORT,
+    isLocal: process.env.IS_LOCAL,
+    apiBaseUrl,
+    redisUrl: maskConnectionString(redisUrl),
+    hasDatabaseUrl: Boolean(process.env.DATABASE_URL),
+    hasPostgresHost: Boolean(process.env.POSTGRES_HOST),
+  });
+
+  try {
+    const healthUrl = `${apiBaseUrl.replace(/\/+$/, '')}/health`;
+    const response = await axios.get(healthUrl, { timeout: 8_000 });
+    console.log(`[DIAG][API] OK status=${response.status} url=${healthUrl}`);
+  } catch (error) {
+    console.error('[DIAG][API] FAIL', error instanceof Error ? error.message : error);
+  }
+
+  try {
+    const RedisModule = await import('ioredis');
+    const Redis = RedisModule.default;
+    const client = new Redis(redisUrl, {
+      lazyConnect: true,
+      connectTimeout: 8_000,
+      maxRetriesPerRequest: 1,
+    });
+
+    await client.connect();
+    const ping = await client.ping();
+    const key = `diag:worker:${Date.now()}`;
+    await client.set(key, 'ok', 'EX', 30);
+    const value = await client.get(key);
+    await client.quit();
+    console.log(`[DIAG][REDIS] OK ping=${ping} setGet=${value}`);
+  } catch (error) {
+    console.error('[DIAG][REDIS] FAIL', error instanceof Error ? error.message : error);
+  }
+
+  try {
+    const databaseUrl = process.env.DATABASE_URL;
+    if (databaseUrl) {
+      const pg = await import('pg');
+      const client = new pg.Client({
+        connectionString: databaseUrl,
+        connectionTimeoutMillis: 8_000,
+      });
+
+      await client.connect();
+      const result = await client.query('select 1 as ok');
+      await client.end();
+      console.log(`[DIAG][POSTGRES] OK select1=${result.rows?.[0]?.ok}`);
+    } else {
+      const pgHost = process.env.POSTGRES_HOST;
+      const pgPort = process.env.POSTGRES_PORT ?? '5432';
+      const pgDb = process.env.POSTGRES_DB;
+      const pgUser = process.env.POSTGRES_USER;
+      const pgPassword = process.env.POSTGRES_PASSWORD;
+      const pgSslMode = process.env.POSTGRES_SSLMODE ?? 'disable';
+
+      if (!pgHost || !pgDb || !pgUser || !pgPassword) {
+        console.warn('[DIAG][POSTGRES] SKIP missing DATABASE_URL and one or more POSTGRES_* vars');
+      } else {
+        const pg = await import('pg');
+        const connectionString = `Host=${pgHost};Port=${pgPort};Database=${pgDb};Username=${pgUser};Password=${pgPassword};Ssl Mode=${pgSslMode}`;
+        const client = new pg.Client({
+          connectionString,
+          connectionTimeoutMillis: 8_000,
+        });
+        await client.connect();
+        const result = await client.query('select 1 as ok');
+        await client.end();
+        console.log(`[DIAG][POSTGRES] OK select1=${result.rows?.[0]?.ok}`);
+      }
+    }
+  } catch (error) {
+    console.error('[DIAG][POSTGRES] FAIL', error instanceof Error ? error.message : error);
+  }
+
+  console.log(`[DIAG] ===== Completed in ${Date.now() - startedAt}ms =====`);
 }
 
 /**
@@ -1329,3 +1427,4 @@ process.on('SIGINT', gracefulShutdown);
 process.on('SIGTERM', gracefulShutdown);
 
 console.log('Workers V2 started (classify + crawl + score) — Cheerio-first with SSE streaming');
+void runStartupDiagnostics();
