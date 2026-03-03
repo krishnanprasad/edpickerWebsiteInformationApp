@@ -15,8 +15,9 @@
  */
 import 'dotenv/config';
 import axios from 'axios';
-import { Worker } from 'bullmq';
+import { Queue, Worker } from 'bullmq';
 import http from 'node:http';
+import IORedis from 'ioredis';
 
 import {
   canonicalizeUrl, shouldSkipUrl, classifyUrlTier,
@@ -59,6 +60,9 @@ const internalApiKey = process.env.INTERNAL_API_KEY ?? 'change-me';
 const openAiApiKey = process.env.OPENAI_API_KEY ?? '';
 const openAiBaseUrl = process.env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1';
 const scoringModel = process.env.OPENAI_MODEL_SCORING ?? 'gpt-4o-mini';
+const classifyQueueName = process.env.CLASSIFY_QUEUE_NAME || 'schoollens-classify';
+const crawlQueueName = process.env.CRAWLER_QUEUE_NAME || 'schoollens-crawl';
+const scoringQueueName = process.env.SCORING_QUEUE_NAME || 'schoollens-score';
 
 const PLAYWRIGHT_HARD_BUDGET = Number(process.env.PLAYWRIGHT_BUDGET ?? 5);
 const CHEERIO_MIN_TEXT_LENGTH = 500;
@@ -433,7 +437,7 @@ async function classifyUrl(url: string): Promise<{
 }
 
 const classifyWorker = new Worker(
-  process.env.CLASSIFY_QUEUE_NAME || 'schoollens-classify',
+  classifyQueueName,
   async (job) => {
     const { sessionId, url, maxPages } = job.data as { sessionId: string; url: string; maxPages: number };
     const result = await classifyUrl(url);
@@ -1210,7 +1214,7 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
 }
 
 const crawlWorker = new Worker(
-  process.env.CRAWLER_QUEUE_NAME || 'schoollens-crawl',
+  crawlQueueName,
   async (job) => {
     const { sessionId, url, maxPages } = job.data as { sessionId: string; url: string; maxPages: number };
     await crawlV2(sessionId, url, maxPages || 30);
@@ -1336,7 +1340,7 @@ function computeClarityScore(clarity: ClarityResult): { total: number; label: st
 }
 
 const scoringWorker = new Worker(
-  process.env.SCORING_QUEUE_NAME || 'schoollens-score',
+  scoringQueueName,
   async (job) => {
     const { sessionId, url, extractedText } = job.data as { sessionId: string; url?: string; extractedText?: string };
     const text = extractedText || '';
@@ -1400,6 +1404,53 @@ const scoringWorker = new Worker(
   { connection: redisConnection },
 );
 
+const classifyQueue = new Queue(classifyQueueName, { connection: redisConnection });
+const crawlQueue = new Queue(crawlQueueName, { connection: redisConnection });
+const bridgeClients: IORedis[] = [];
+let bridgeStopRequested = false;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function startLegacyListBridge(listName: string, queue: Queue): Promise<void> {
+  const redisUrl = resolveRedisUrl();
+  const client = new IORedis(redisUrl, {
+    maxRetriesPerRequest: null,
+    enableReadyCheck: false,
+  });
+  bridgeClients.push(client);
+
+  console.log(`[BRIDGE] Listening Redis list '${listName}' -> BullMQ queue '${queue.name}'`);
+
+  while (!bridgeStopRequested) {
+    try {
+      const result = await client.brpop(listName, 0);
+      if (!result || bridgeStopRequested) continue;
+
+      const payload = result[1];
+      let data: unknown;
+      try {
+        data = JSON.parse(payload);
+      } catch (error) {
+        console.error(`[BRIDGE] Invalid JSON on list '${listName}'`, error instanceof Error ? error.message : error);
+        continue;
+      }
+
+      await queue.add('legacy', data, {
+        removeOnComplete: { count: 200 },
+        removeOnFail: { count: 200 },
+      });
+
+      console.log(`[BRIDGE] Forwarded job from list '${listName}'`);
+    } catch (error) {
+      if (bridgeStopRequested) break;
+      console.error(`[BRIDGE] Error on list '${listName}'`, error instanceof Error ? error.message : error);
+      await sleep(1000);
+    }
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /*  Lifecycle + graceful shutdown                                      */
 /* ------------------------------------------------------------------ */
@@ -1413,10 +1464,14 @@ scoringWorker.on('failed', (job, err) => console.error(`✗ Score: ${job?.id}`, 
 
 async function gracefulShutdown() {
   console.log('Shutting down workers...');
+  bridgeStopRequested = true;
+  await Promise.allSettled(bridgeClients.map((client) => client.quit()));
   await Promise.allSettled([
     classifyWorker.close(),
     crawlWorker.close(),
     scoringWorker.close(),
+    classifyQueue.close(),
+    crawlQueue.close(),
     closePlaywrightBrowser(),
     closeSseClient(),
   ]);
@@ -1427,4 +1482,6 @@ process.on('SIGINT', gracefulShutdown);
 process.on('SIGTERM', gracefulShutdown);
 
 console.log('Workers V2 started (classify + crawl + score) — Cheerio-first with SSE streaming');
+void startLegacyListBridge(classifyQueueName, classifyQueue);
+void startLegacyListBridge(crawlQueueName, crawlQueue);
 void runStartupDiagnostics();
