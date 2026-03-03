@@ -16,6 +16,7 @@
 import 'dotenv/config';
 import axios from 'axios';
 import { Worker } from 'bullmq';
+import http from 'node:http';
 
 import {
   canonicalizeUrl, shouldSkipUrl, classifyUrlTier,
@@ -61,6 +62,14 @@ const scoringModel = process.env.OPENAI_MODEL_SCORING ?? 'gpt-4o-mini';
 const PLAYWRIGHT_HARD_BUDGET = Number(process.env.PLAYWRIGHT_BUDGET ?? 5);
 const CHEERIO_MIN_TEXT_LENGTH = 500;
 const HEARTBEAT_INTERVAL_MS = 10_000;
+const WORKER_PORT = Number(process.env.PORT || 8080);
+
+http.createServer((_req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('ok');
+}).listen(WORKER_PORT, () => {
+  console.log(`Worker health server listening on ${WORKER_PORT}`);
+});
 
 /* ------------------------------------------------------------------ */
 /*  Education keywords + categories (for classification)               */
