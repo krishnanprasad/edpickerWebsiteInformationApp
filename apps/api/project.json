@@ -1,0 +1,21 @@
+{
+  "name": "api",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "src",
+  "projectType": "application",
+  "targets": {
+    "dev": {
+      "command": "tsx watch src/server.ts"
+    },
+    "build": {
+      "command": "tsc -p tsconfig.json"
+    },
+    "dev:dotnet": {
+      "command": "dotnet run --project apps/api/SchoolLens.Api/SchoolLens.Api.csproj"
+    },
+    "build:dotnet": {
+      "command": "dotnet build apps/api/SchoolLens.Api/SchoolLens.Api.csproj"
+    }
+  },
+  "tags": ["scope:api", "type:backend"]
+}

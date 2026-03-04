@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SchoolLens - Scan & Ask</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 2rem auto; max-width: 900px; padding: 0 1rem; }
+    .card { border: 1px solid #d9d9d9; border-radius: 10px; padding: 1rem; margin-bottom: 1rem; }
+    input, textarea, button { width: 100%; padding: 10px; box-sizing: border-box; margin-top: .5rem; }
+    .chat { max-height: 280px; overflow: auto; border: 1px solid #eee; border-radius: 8px; padding: .75rem; }
+    .user { color: #1d4ed8; }
+    .assistant { color: #166534; }
+    .muted { color: #666; }
+  </style>
+</head>
+<body>
+  <h1>SchoolLens</h1>
+  <p class="muted">Scan a URL and ask questions on the same page.</p>
+
+  <div class="card">
+    <strong>1) Scan</strong>
+    <input id="url" type="url" placeholder="https://example-school.edu" />
+    <button id="scan">Scan</button>
+    <p id="status" class="muted"></p>
+  </div>
+
+  <div class="card" id="result" style="display:none">
+    <strong>Result</strong>
+    <p id="score"></p>
+    <p id="summary"></p>
+    <p id="session" class="muted"></p>
+  </div>
+
+  <div class="card" id="qa" style="display:none">
+    <strong>2) Ask</strong>
+    <div id="chat" class="chat"></div>
+    <textarea id="question" rows="3" placeholder="What is missing for parents?"></textarea>
+    <button id="ask">Ask</button>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
