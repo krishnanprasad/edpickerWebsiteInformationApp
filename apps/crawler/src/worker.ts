@@ -17,7 +17,7 @@ import 'dotenv/config';
 import axios from 'axios';
 import { Queue, Worker } from 'bullmq';
 import http from 'node:http';
-import IORedis from 'ioredis';
+import { Redis as IORedisClient } from 'ioredis';
 
 import {
   canonicalizeUrl, shouldSkipUrl, classifyUrlTier,
@@ -166,9 +166,7 @@ async function runStartupDiagnostics() {
   }
 
   try {
-    const RedisModule = await import('ioredis');
-    const Redis = RedisModule.default;
-    const client = new Redis(redisUrl, {
+    const client = new IORedisClient(redisUrl, {
       lazyConnect: true,
       connectTimeout: 8_000,
       maxRetriesPerRequest: 1,
@@ -188,8 +186,10 @@ async function runStartupDiagnostics() {
   try {
     const databaseUrl = process.env.DATABASE_URL;
     if (databaseUrl) {
-      const pg = await import('pg');
-      const client = new pg.Client({
+      // @ts-ignore - pg types not installed
+      const pg = await import('pg') as any;
+      const PgClient = pg.default?.Client ?? pg.Client;
+      const client = new PgClient({
         connectionString: databaseUrl,
         connectionTimeoutMillis: 8_000,
       });
@@ -209,10 +209,11 @@ async function runStartupDiagnostics() {
       if (!pgHost || !pgDb || !pgUser || !pgPassword) {
         console.warn('[DIAG][POSTGRES] SKIP missing DATABASE_URL and one or more POSTGRES_* vars');
       } else {
-        const pg = await import('pg');
-        const connectionString = `Host=${pgHost};Port=${pgPort};Database=${pgDb};Username=${pgUser};Password=${pgPassword};Ssl Mode=${pgSslMode}`;
-        const client = new pg.Client({
-          connectionString,
+        // @ts-ignore - pg types not installed
+        const pg = await import('pg') as any;
+        const PgClient = pg.default?.Client ?? pg.Client;
+        const client = new PgClient({
+          connectionString: `postgresql://${pgUser}:${pgPassword}@${pgHost}:${pgPort}/${pgDb}?sslmode=${pgSslMode}`,
           connectionTimeoutMillis: 8_000,
         });
         await client.connect();
@@ -1424,7 +1425,7 @@ const scoringWorker = new Worker(
 
 const classifyQueue = new Queue(classifyQueueName, { connection: redisConnection });
 const crawlQueue = new Queue(crawlQueueName, { connection: redisConnection });
-const bridgeClients: IORedis[] = [];
+const bridgeClients: IORedisClient[] = [];
 let bridgeStopRequested = false;
 
 function sleep(ms: number): Promise<void> {
@@ -1433,10 +1434,15 @@ function sleep(ms: number): Promise<void> {
 
 async function startLegacyListBridge(listName: string, queue: Queue): Promise<void> {
   const redisUrl = resolveRedisUrl();
-  const client = new IORedis(redisUrl, {
+  const parsed = new URL(redisUrl);
+  const client = new IORedisClient({
+    host: parsed.hostname,
+    port: parsed.port ? Number(parsed.port) : 6379,
+    username: decodeURIComponent(parsed.username || 'default'),
+    password: decodeURIComponent(parsed.password || ''),
+    tls: parsed.protocol === 'rediss:' ? {} : undefined,
     maxRetriesPerRequest: null,
     enableReadyCheck: false,
-    tls: redisUrl.startsWith('rediss://') ? {} : undefined,
   });
   bridgeClients.push(client);
 
