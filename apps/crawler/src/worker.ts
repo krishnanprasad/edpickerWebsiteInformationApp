@@ -752,10 +752,31 @@ function extractIdentity($: import('cheerio').CheerioAPI, _html: string, _url: s
     }
   }
   if (!identity.address) {
-    // Pattern: Look for Indian PIN code (6 digits) preceded by text
-    const addrMatch = bodyText.match(/(?:address|location|located at|situated at)\s*[:.\-–]?\s*(.{10,200}?\b\d{6}\b)/i);
+    // Footer / contact-info sections: look for text blocks containing Indian PIN code
+    const contactSections = $('footer, [class*="contact"], [class*="footer"], [id*="contact"], [id*="footer"]');
+    contactSections.each((_, el) => {
+      if (identity.address) return;
+      const sectionText = $(el).text().replace(/\s+/g, ' ').trim();
+      const m = sectionText.match(/([A-Z][A-Za-z .,'&\-]{8,180}?\b\d{6}\b\.?)/i);
+      if (m?.[1] && /[a-zA-Z]/.test(m[1]) && m[1].split(/[,.]/).length >= 2) {
+        identity.address = m[1].trim().replace(/\s+/g, ' ').slice(0, 200);
+      }
+    });
+  }
+  if (!identity.address) {
+    // Pattern: Look for explicit "address:" / "location:" prefix + PIN code
+    const addrMatch = bodyText.match(/(?:address|location|located at|situated at|contact\s*(?:info|us)?)\s*[:.–\-]?\s*(.{10,200}?\b\d{6}\b)/i);
     if (addrMatch?.[1]) {
       identity.address = addrMatch[1].trim().replace(/\s+/g, ' ').slice(0, 200);
+    }
+  }
+  if (!identity.address) {
+    // Broad fallback: any sentence containing Indian state name + 6-digit PIN
+    const INDIAN_STATES_RE = 'andhra pradesh|arunachal pradesh|assam|bihar|chhattisgarh|goa|gujarat|haryana|himachal pradesh|jharkhand|karnataka|kerala|madhya pradesh|maharashtra|manipur|meghalaya|mizoram|nagaland|odisha|punjab|rajasthan|sikkim|tamil\\s?nadu|telangana|tripura|uttar pradesh|uttarakhand|west bengal|delhi|chandigarh|puducherry|tamilnadu';
+    const statePin = new RegExp('([A-Za-z][A-Za-z .,\'&\\-]{8,180}?(?:' + INDIAN_STATES_RE + ')[A-Za-z .,\\-]*\\b\\d{6}\\b\\.?)', 'i');
+    const spm = bodyText.match(statePin);
+    if (spm?.[1] && spm[1].split(/[,.]/).length >= 2) {
+      identity.address = spm[1].trim().replace(/\s+/g, ' ').slice(0, 200);
     }
   }
 
@@ -914,9 +935,30 @@ function refineIdentity(existing: EarlyIdentity, $: import('cheerio').CheerioAPI
       }
     }
     if (!existing.address) {
-      const addrMatch = bodyText.match(/(?:address|location|located at|situated at)\s*[:.\-–]?\s*(.{10,200}?\b\d{6}\b)/i);
+      // Footer / contact-info sections containing Indian PIN code
+      const contactSections = $('footer, [class*="contact"], [class*="footer"], [id*="contact"], [id*="footer"]');
+      contactSections.each((_, el) => {
+        if (existing.address) return;
+        const sectionText = $(el).text().replace(/\s+/g, ' ').trim();
+        const m = sectionText.match(/([A-Z][A-Za-z .,'&\-]{8,180}?\b\d{6}\b\.?)/i);
+        if (m?.[1] && /[a-zA-Z]/.test(m[1]) && m[1].split(/[,.]/).length >= 2) {
+          existing.address = m[1].trim().replace(/\s+/g, ' ').slice(0, 200); changed = true;
+        }
+      });
+    }
+    if (!existing.address) {
+      const addrMatch = bodyText.match(/(?:address|location|located at|situated at|contact\s*(?:info|us)?)\s*[:.–\-]?\s*(.{10,200}?\b\d{6}\b)/i);
       if (addrMatch?.[1]) {
         existing.address = addrMatch[1].trim().replace(/\s+/g, ' ').slice(0, 200); changed = true;
+      }
+    }
+    if (!existing.address) {
+      // Broad fallback: sentence with Indian state name + 6-digit PIN
+      const INDIAN_STATES_RE = 'andhra pradesh|arunachal pradesh|assam|bihar|chhattisgarh|goa|gujarat|haryana|himachal pradesh|jharkhand|karnataka|kerala|madhya pradesh|maharashtra|manipur|meghalaya|mizoram|nagaland|odisha|punjab|rajasthan|sikkim|tamil\\s?nadu|telangana|tripura|uttar pradesh|uttarakhand|west bengal|delhi|chandigarh|puducherry|tamilnadu';
+      const statePin = new RegExp('([A-Za-z][A-Za-z .,\'&\\-]{8,180}?(?:' + INDIAN_STATES_RE + ')[A-Za-z .,\\-]*\\b\\d{6}\\b\\.?)', 'i');
+      const spm = bodyText.match(statePin);
+      if (spm?.[1] && spm[1].split(/[,.]/).length >= 2) {
+        existing.address = spm[1].trim().replace(/\s+/g, ' ').slice(0, 200); changed = true;
       }
     }
   }
