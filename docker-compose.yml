@@ -51,6 +51,8 @@ services:
       EDUCATION_CONFIDENCE_THRESHOLD: 60
       INTERNAL_API_KEY: change-me
       B2B_CTA_URL: https://edpicker.com/verify
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL_CHAT: ${OPENAI_MODEL_CHAT:-gpt-4o-mini}
       STORAGE_PROVIDER: s3
       STORAGE_BUCKET: schoollens-assets
       S3_ENDPOINT: http://minio:9000

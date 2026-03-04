@@ -775,11 +775,54 @@ function extractIdentity($: import('cheerio').CheerioAPI, _html: string, _url: s
     }
   }
 
-  const visionMatch = bodyText.match(/(?:our\s+)?vision\s*(?:[:,\-–]|statement)?\s*([\s\S]{10,300}?)(?:\.|\n|our\s+mission|$)/i);
-  if (visionMatch?.[1]) identity.vision = visionMatch[1].trim().replace(/\s+/g, ' ').slice(0, 200);
+  /* -- Vision/Mission: DOM-first (heading → next sibling) to avoid nav/banner noise -- */
+  const isNavNoise = (text: string) =>
+    /\b(menu|nav|home|contact us|admission|enroll|click here|read more|get in touch|←|→)\b/i.test(text.slice(0, 60)) ||
+    text.split(/\s+/).length < 4;
 
-  const missionMatch = bodyText.match(/(?:our\s+)?mission\s*(?:[:,\-–]|statement)?\s*([\s\S]{10,300}?)(?:\.|\n|our\s+vision|$)/i);
-  if (missionMatch?.[1]) identity.mission = missionMatch[1].trim().replace(/\s+/g, ' ').slice(0, 200);
+  if (!identity.vision) {
+    $('h1, h2, h3, h4, h5, strong, b').each((_, el) => {
+      if (/^(?:our\s+)?vision(?:\s+statement)?$/i.test($(el).text().trim())) {
+        // Try immediate following sibling paragraph/div
+        let candidate = $(el).nextAll('p, blockquote').first().text().trim().replace(/\s+/g, ' ');
+        if (!candidate) candidate = $(el).parent().next('p, blockquote, div').first().text().trim().replace(/\s+/g, ' ');
+        if (candidate.length >= 15 && candidate.length <= 500 && !isNavNoise(candidate)) {
+          identity.vision = candidate.slice(0, 250);
+          return false as any; // break each
+        }
+      }
+      return undefined;
+    });
+  }
+  if (!identity.vision) {
+    // Fallback regex — require colon/dash separator to reduce false positives
+    const vm = bodyText.match(/(?:our\s+)?vision\s*[:\-–]\s*([\s\S]{15,300}?)(?:\n{2,}|our\s+mission|$)/i);
+    if (vm?.[1]) {
+      const v = vm[1].trim().replace(/\s+/g, ' ');
+      if (!isNavNoise(v)) identity.vision = v.slice(0, 250);
+    }
+  }
+
+  if (!identity.mission) {
+    $('h1, h2, h3, h4, h5, strong, b').each((_, el) => {
+      if (/^(?:our\s+)?mission(?:\s+statement)?$/i.test($(el).text().trim())) {
+        let candidate = $(el).nextAll('p, blockquote').first().text().trim().replace(/\s+/g, ' ');
+        if (!candidate) candidate = $(el).parent().next('p, blockquote, div').first().text().trim().replace(/\s+/g, ' ');
+        if (candidate.length >= 15 && candidate.length <= 500 && !isNavNoise(candidate)) {
+          identity.mission = candidate.slice(0, 250);
+          return false as any;
+        }
+      }
+      return undefined;
+    });
+  }
+  if (!identity.mission) {
+    const mm = bodyText.match(/(?:our\s+)?mission\s*[:\-–]\s*([\s\S]{15,300}?)(?:\n{2,}|our\s+vision|$)/i);
+    if (mm?.[1]) {
+      const m2 = mm[1].trim().replace(/\s+/g, ' ');
+      if (!isNavNoise(m2)) identity.mission = m2.slice(0, 250);
+    }
+  }
 
   return identity;
 }
@@ -1292,12 +1335,19 @@ Return a JSON object with exactly this structure:
 }
 
 Rules:
-- "found" = explicitly mentioned with clear evidence
-- "unclear" = vaguely mentioned or partially referenced
+- "found" = explicitly stated with clear, specific evidence on the website
+- "unclear" = topic is mentioned but vaguely, without verifiable details
 - "missing" = no mention at all
-- For evidence fields, provide the shortest relevant excerpt (max 100 chars) or null
-- For clarity booleans, true = clearly presented with actionable information, false = absent or vague
-- Be strict: generic mentions of "safety" without specific certificates count as "unclear"`;
+- For evidence fields, provide shortest relevant excerpt (max 100 chars) or null
+- Be STRICT on safety: generic phrases like "safe environment" or "we care for safety" count as "unclear", NOT "found"
+
+Clarity rules (these must be SPECIFIC and ACTIONABLE for parents to be true):
+- admission_dates_visible = true ONLY if the website states specific open/close dates, months, or an academic year intake window (e.g. "Admissions open January to March 2025"). "Admissions are open" alone = false.
+- fee_clarity = true ONLY if actual fee amounts are published (e.g. ₹45,000/year or ranges). "Contact us for fees" = false.
+- academic_calendar = true ONLY if term dates, holidays, or exam schedule are listed. Generic "April to March" academic year = false.
+- contact_and_map = true if a phone number AND physical address are both present.
+- results_published = true if board exam results, pass percentages, or merit lists are published.
+- When in doubt, prefer false — parents are better served by accurate gaps than false confidence.`;
 
 function keywordFallbackScoring(text: string): { safety: SafetyResult; clarity: ClarityResult } {
   const lowerText = text.toLowerCase();
@@ -1331,11 +1381,13 @@ function keywordFallbackScoring(text: string): { safety: SafetyResult; clarity: 
       anti_bullying_evidence: findEvidence(['anti-bullying', 'anti bullying', 'bullying policy', 'discipline policy', 'harassment policy']),
     },
     clarity: {
-      admission_dates_visible: lowerText.includes('admission') && /\d{1,2}[\s/-]\w+[\s/-]\d{2,4}/.test(lowerText),
-      fee_clarity: lowerText.includes('fee') && /₹|rs\.?|inr|\d{3,}/i.test(lowerText),
-      academic_calendar: /academic calendar|term dates|session \d{4}/i.test(lowerText),
+      // Require specific date patterns near "admission" (e.g. "Jan 2025", "15 March", "2025-2026 intake")
+      admission_dates_visible: lowerText.includes('admission') && /\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\s+\d{4}\b|\b\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)|\bopen(s)? (till|until|from)\b/i.test(lowerText),
+      // Require actual rupee amounts near "fee"
+      fee_clarity: lowerText.includes('fee') && /₹\s*\d|rs\.?\s*\d|\binr\s*\d|\d[\d,]+\s*(per year|per annum|annually|\/year|p\.a\.)/i.test(lowerText),
+      academic_calendar: /academic calendar|term (start|end|dates)|exam schedule|holiday list|school reopen/i.test(lowerText),
       contact_and_map: (lowerText.includes('contact') || lowerText.includes('phone')) && /\d{10}|\d{3}[\s-]\d{3,4}[\s-]\d{4}/.test(lowerText),
-      results_published: /results|pass percentage|board results|toppers/i.test(lowerText),
+      results_published: /board results|pass percentage|toppers|\d+%\s*(pass|result)/i.test(lowerText),
     },
   };
 }
@@ -1389,9 +1441,25 @@ const scoringWorker = new Worker(
     const clarityScore = computeClarityScore(clarity);
     const overallScore = Math.round((safetyScore.total + clarityScore.total) / 2);
 
-    const summary = overallScore >= 70
-      ? 'Good parent-readiness baseline. Safety information and decision clarity are well-covered.'
-      : 'Important parent-facing details are missing. Improve safety documentation and information clarity.';
+    // Build a meaningful summary using the actual extracted signals
+    const foundSafety = [safety.fire_certificate, safety.sanitary_certificate, safety.cctv_mention, safety.transport_safety, safety.anti_bullying_policy].filter(v => v === 'found');
+    const missingSafety = [safety.fire_certificate, safety.sanitary_certificate, safety.cctv_mention, safety.transport_safety, safety.anti_bullying_policy].filter(v => v === 'missing');
+    const clarityItems: string[] = [];
+    if (clarity.admission_dates_visible) clarityItems.push('admission dates');
+    if (clarity.fee_clarity) clarityItems.push('fee structure');
+    if (clarity.academic_calendar) clarityItems.push('academic calendar');
+    if (clarity.contact_and_map) clarityItems.push('contact details');
+    if (clarity.results_published) clarityItems.push('exam results');
+
+    let summary: string;
+    if (overallScore >= 70) {
+      summary = `This school's website is well-prepared for parents. ${clarityItems.length > 0 ? `Key information available: ${clarityItems.join(', ')}.` : ''} ${foundSafety.length >= 3 ? 'Safety disclosures are clearly documented.' : ''}`.trim();
+    } else if (overallScore >= 40) {
+      const missingClarity = ['admission dates', 'fee structure', 'academic calendar', 'contact details', 'exam results'].filter(i => !clarityItems.includes(i));
+      summary = `Some parent-facing details are present${clarityItems.length > 0 ? ` (${clarityItems.join(', ')})` : ''}, but key information is missing: ${missingClarity.slice(0, 3).join(', ')}. ${missingSafety.length >= 3 ? 'Safety certifications are not clearly documented.' : ''}`.trim();
+    } else {
+      summary = `Important parent-facing details are missing. ${missingSafety.length > 0 ? 'Safety documentation (fire NOC, CCTV, anti-bullying policy) is not clearly mentioned. ' : ''}${clarityItems.length === 0 ? 'Admission, fee, and contact information are not clearly published.' : `Only ${clarityItems.join(', ')} ${clarityItems.length === 1 ? 'is' : 'are'} documented.`}`.trim();
+    }
 
     await emitEvent(sessionId, 'final_score', { safety: safetyScore.total, clarity: clarityScore.total, overall: overallScore });
 

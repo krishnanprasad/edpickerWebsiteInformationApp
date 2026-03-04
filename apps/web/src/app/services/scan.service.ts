@@ -1,7 +1,7 @@
 import { Injectable, inject, NgZone } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable, interval, switchMap, takeWhile, map, startWith } from 'rxjs';
-import { ScanResponse, AskResponse, B2bInterestResponse, ScanStatus, SSEEvent, SSEEventType } from '../models/scan.models';
+import { ScanResponse, AskResponse, B2bInterestResponse, ScanStatus, SSEEvent, SSEEventType, RedFlagsResponse } from '../models/scan.models';
 
 @Injectable({ providedIn: 'root' })
 export class ScanService {
@@ -84,6 +84,11 @@ export class ScanService {
   /** Ask a question about crawled content. */
   ask(sessionId: string, question: string): Observable<AskResponse> {
     return this.http.post<AskResponse>(`/api/scan/${sessionId}/ask`, { question });
+  }
+
+  /** Fetch AI-generated red flags for a completed scan (lazily, cached server-side). */
+  getRedFlags(sessionId: string): Observable<RedFlagsResponse> {
+    return this.http.get<RedFlagsResponse>(`/api/scan/${sessionId}/red-flags`);
   }
 
   /** Track B2B CTA interest click. */

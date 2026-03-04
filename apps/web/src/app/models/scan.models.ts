@@ -169,3 +169,16 @@ export interface PreliminaryScore {
   clarity: number;
   overall: number;
 }
+
+export interface RedFlag {
+  severity: 'high' | 'medium';
+  flag: string;
+  reason: string;
+}
+
+export interface RedFlagsResponse {
+  sessionId: string;
+  flags: RedFlag[];
+  generatedAt: string;
+  fromCache: boolean;
+}

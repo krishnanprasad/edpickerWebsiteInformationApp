@@ -41,13 +41,27 @@ import { ScanStatus } from '../models/scan.models';
           right questions before admission.
         </p>
 
+        <div class="city-row">
+          <div class="input-wrapper">
+            <mat-icon class="input-icon">location_city</mat-icon>
+            <input
+              class="url-input"
+              [(ngModel)]="city"
+              placeholder="City or PIN code (e.g. Coimbatore, 641001)"
+              (keyup.enter)="onCitySearch()" />
+          </div>
+          <button class="ghost-search-btn" (click)="onCitySearch()">Find Schools</button>
+        </div>
+
+        <div class="or-divider"><span>or paste a school URL directly</span></div>
+
         <div class="input-row">
           <div class="input-wrapper">
             <mat-icon class="input-icon">language</mat-icon>
             <input
               class="url-input"
               [(ngModel)]="url"
-              placeholder="Enter school website (e.g. www.school.edu.in)"
+              placeholder="Paste any Indian school website URL"
               (keyup.enter)="onScan()" />
           </div>
           <button class="primary-btn" [disabled]="!url.trim() || scanning" (click)="onScan()">
@@ -55,7 +69,9 @@ import { ScanStatus } from '../models/scan.models';
           </button>
         </div>
 
+        <p class="tagline-sub">Get an honest analysis in 30 seconds.</p>
         <p *ngIf="error" class="error-text">{{ error }}</p>
+        <p *ngIf="cityMessage" class="city-message">{{ cityMessage }}</p>
 
         <div class="hero-actions">
           <a class="link-btn" (click)="showHow = !showHow">
@@ -192,6 +208,59 @@ import { ScanStatus } from '../models/scan.models';
       opacity: 0.9;
       margin: 0 0 28px;
     }
+    .city-row {
+      display: flex;
+      gap: 10px;
+      background: rgba(255,255,255,0.15);
+      border: 1px solid rgba(255,255,255,0.3);
+      border-radius: 14px;
+      padding: 6px;
+      margin-bottom: 0;
+    }
+    .ghost-search-btn {
+      background: rgba(255,255,255,0.2);
+      border: 1px solid rgba(255,255,255,0.4);
+      color: #fff;
+      border-radius: 10px;
+      padding: 10px 18px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      font-family: 'Roboto', sans-serif;
+      transition: background 0.2s;
+    }
+    .ghost-search-btn:hover { background: rgba(255,255,255,0.3); }
+    .city-row .url-input { color: #fff; }
+    .city-row .url-input::placeholder { color: rgba(255,255,255,0.6); }
+    .city-row .input-icon { color: rgba(255,255,255,0.7); }
+    .or-divider {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: rgba(255,255,255,0.5);
+      font-size: 12px;
+      margin: 10px 0;
+    }
+    .or-divider::before, .or-divider::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: rgba(255,255,255,0.2);
+    }
+    .tagline-sub {
+      color: rgba(255,255,255,0.75);
+      font-size: 13px;
+      margin: 10px 0 0;
+    }
+    .city-message {
+      color: rgba(255,255,255,0.85);
+      font-size: 13px;
+      margin: 8px 0 0;
+      background: rgba(255,255,255,0.1);
+      border-radius: 8px;
+      padding: 8px 12px;
+    }
     .input-row {
       display: flex;
       gap: 10px;
@@ -297,6 +366,8 @@ export class ScanInputComponent {
   @Output() reset = new EventEmitter<void>();
 
   url = '';
+  city = '';
+  cityMessage = '';
   scanning = false;
   error = '';
   showHow = false;
@@ -341,10 +412,17 @@ export class ScanInputComponent {
     this.scanUrl.emit(testUrl);
   }
 
+  onCitySearch() {
+    if (!this.city.trim()) return;
+    this.cityMessage = `City/PIN search coming soon. In the meantime, paste the school's website URL below.`;
+  }
+
   onReset() {
     this.scanning = false;
     this.error = '';
     this.url = '';
+    this.city = '';
+    this.cityMessage = '';
     this.reset.emit();
   }
 }

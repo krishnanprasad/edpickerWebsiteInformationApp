@@ -62,12 +62,20 @@ interface ChatMessage {
     </div>
   `,
   styles: [`
+    :host {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+    }
     .ask-card {
       background: #fff;
       border-radius: var(--sl-radius, 12px);
       padding: 24px;
       box-shadow: var(--sl-shadow);
       transition: opacity 0.3s;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
     }
     .ask-card.disabled { opacity: 0.6; }
     .card-title {
@@ -129,6 +137,7 @@ interface ChatMessage {
       display: flex; gap: 8px;
       background: #f5f5f5; border-radius: 12px;
       padding: 4px 4px 4px 16px;
+      margin-top: auto;
     }
     .ask-input {
       flex: 1; border: none; outline: none;

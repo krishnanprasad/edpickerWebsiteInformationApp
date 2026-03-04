@@ -513,18 +513,44 @@ async function aiAnswer(question: string, content: string): Promise<string | nul
     messages: [
       {
         role: 'system',
-        content:
-          'You are a helpful school-information assistant for parents. ' +
-          'Answer the question using ONLY the provided website content. ' +
-          'If the information is partially available, share what you found. ' +
-          'Only say "not found" if the content truly has zero relevant information. ' +
-          'Be specific and cite page URLs when possible.',
+        content: `You are SchoolLens, a trusted school-research assistant helping Indian parents make informed decisions about schools.
+
+Your job is to answer parent questions using ONLY the school website content provided. Parents ask about admissions, fees, safety, academics, facilities, and policies.
+
+RULES — follow strictly:
+1. LEAD WITH WHAT EXISTS. If the website mentions admissions are open, fee ranges, grades offered, or any related fact — share it immediately, even if the exact detail asked for (e.g. specific dates or exact fee amount) is missing.
+2. DISTINGUISH availability from details. Example: "Admissions are currently open for Pre-primary 1 to Grade 8" is a valid answer to "What are the admission dates?" — always share this rather than saying "not found".
+3. Only say information is not available if the website content has ZERO sentences related to the topic — this should be rare.
+4. Format: 2–4 sentences. Use plain English. If multiple facts exist, use a short bullet list.
+5. End with the source page URL when possible (e.g. "Source: yagappainternationalschool.org/admissions").
+6. NEVER invent information. Only use what is in the provided content.
+7. Indian context: rupee fees (₹), CBSE/ICSE/IB boards, academic year April–March, term exams, PTM (Parent-Teacher Meetings) — use these terms naturally if they appear in the content.`,
       },
-      { role: 'user', content: `Question: ${question}\n\nWebsite content:\n${content}` },
+      { role: 'user', content: `Parent question: ${question}\n\nSchool website content:\n${content}` },
     ],
   });
 
   return completion.choices[0]?.message?.content ?? null;
+}
+
+/** Build a plain-text answer from the best content chunk when AI is unavailable or returns nothing. */
+function buildFallbackFromContent(
+  question: string,
+  sources: { url: string; excerpt: string }[],
+): string {
+  if (sources.length === 0) {
+    return 'This information was not found on the school website. You may want to contact the school directly.';
+  }
+
+  // Pick the best source (already ranked)
+  const best = sources[0];
+  const snippet = best.excerpt.replace(/\s+/g, ' ').trim();
+
+  return (
+    `Based on the school website (${best.url}):\n` +
+    `"${snippet.length > 400 ? snippet.slice(0, 400) + '…' : snippet}"\n\n` +
+    `(AI analysis unavailable — showing raw extracted content. Exact details may differ.)`
+  );
 }
 
 /* ================================================================== */
@@ -573,6 +599,160 @@ app.post('/api/scan', async (req, res) => {
   });
 
   return res.status(202).json({ cached: false, sessionId, status: 'Classifying' });
+});
+
+/* ================================================================== */
+/*  GET /api/scan/:id/red-flags — AI-enriched parent red flags        */
+/*  (registered BEFORE /api/scan/:id so Express matches it first)      */
+/* ================================================================== */
+
+app.get('/api/scan/:id/red-flags', async (req, res) => {
+  const sessionId = req.params.id;
+
+  const sessionRow = await pgPool.query(
+    'SELECT status FROM analysis_sessions WHERE id = $1',
+    [sessionId]
+  );
+  if (!sessionRow.rowCount) return res.status(404).json({ error: 'Session not found' });
+
+  // Redis cache check
+  const cacheKey = `red-flags:${sessionId}`;
+  try {
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      const parsed: unknown = JSON.parse(cached);
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ ...(parsed as object), fromCache: true });
+    }
+  } catch (_) { /* cache miss — continue */ }
+
+  type RuleFlag = { severity: 'high' | 'medium'; flag: string; reason: string };
+  const flags: RuleFlag[] = [];
+
+  // ── Rule-based flags from safety_scores ────────────────────────────
+  const safetyRow = await pgPool.query(
+    `SELECT fire_certificate, sanitary_certificate, cctv_mention, transport_safety, anti_bullying_policy
+     FROM safety_scores WHERE session_id = $1`,
+    [sessionId]
+  );
+  if (safetyRow.rowCount) {
+    const s = safetyRow.rows[0];
+    if (s.fire_certificate === 'missing')
+      flags.push({ severity: 'high', flag: 'No fire safety certificate mentioned', reason: 'The school website does not mention a valid fire safety certificate — a mandatory compliance requirement.' });
+    else if (s.fire_certificate === 'unclear')
+      flags.push({ severity: 'medium', flag: 'Fire safety certificate status unclear', reason: 'A fire safety certificate was referenced but the evidence is ambiguous or outdated.' });
+
+    if (s.sanitary_certificate === 'missing')
+      flags.push({ severity: 'high', flag: 'No sanitary / health certificate found', reason: 'No health or sanitary inspection certificate is mentioned on the school website.' });
+    else if (s.sanitary_certificate === 'unclear')
+      flags.push({ severity: 'medium', flag: 'Sanitary certificate status unclear', reason: 'Health or sanitary certificate information is present but ambiguous.' });
+
+    if (s.cctv_mention === 'missing')
+      flags.push({ severity: 'medium', flag: 'No CCTV / surveillance disclosure', reason: 'The school does not disclose whether CCTV cameras are installed — an important safety indicator.' });
+
+    if (s.transport_safety === 'missing')
+      flags.push({ severity: 'medium', flag: 'No transport safety information', reason: 'No mention of GPS tracking, trained drivers, or attendants on school buses was found.' });
+
+    if (s.anti_bullying_policy === 'missing')
+      flags.push({ severity: 'medium', flag: 'No anti-bullying policy found', reason: 'CBSE and NCPCR guidelines require schools to publish an anti-bullying policy. None was found.' });
+  }
+
+  // ── Rule-based flags from clarity_scores ───────────────────────────
+  const clarityRow = await pgPool.query(
+    `SELECT fee_clarity, admission_dates_visible, contact_and_map, results_published, academic_calendar
+     FROM clarity_scores WHERE session_id = $1`,
+    [sessionId]
+  );
+  if (clarityRow.rowCount) {
+    const c = clarityRow.rows[0];
+    if (!c.fee_clarity)
+      flags.push({ severity: 'high', flag: 'Fee structure not disclosed', reason: 'Families cannot find clear fee breakdowns. CBSE mandates fee transparency on school websites.' });
+    if (!c.admission_dates_visible)
+      flags.push({ severity: 'medium', flag: 'Admission timeline not published', reason: 'No clear admission process or deadline dates were found on the website.' });
+    if (!c.contact_and_map)
+      flags.push({ severity: 'medium', flag: 'Contact details or location map missing', reason: 'Adequate contact information and/or school location map was not easily accessible.' });
+    if (!c.results_published)
+      flags.push({ severity: 'medium', flag: 'Academic results not published', reason: 'No board exam results or school performance metrics were published on the website.' });
+    if (!c.academic_calendar)
+      flags.push({ severity: 'medium', flag: 'Academic calendar not provided', reason: 'No academic calendar or holiday schedule was found — important for family planning.' });
+  }
+
+  // ── Optional OpenAI enrichment (up to 2 extra flags) ───────────────
+  if (process.env.OPENAI_API_KEY && flags.length < 7) {
+    try {
+      const factsRow = await pgPool.query(
+        `SELECT fact_key, fact_value FROM crawl_facts WHERE session_id = $1 ORDER BY confidence DESC LIMIT 20`,
+        [sessionId]
+      );
+      const factLines = (factsRow.rows as { fact_key: string; fact_value: string }[])
+        .map(r => `${r.fact_key}: ${r.fact_value}`)
+        .join('\n');
+      const existingTitles = flags.map(f => f.flag).join('; ') || 'none';
+
+      const completion = await openai.chat.completions.create({
+        model: process.env.OPENAI_MODEL_SCORING || 'gpt-4o-mini',
+        temperature: 0,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content: `You are a school transparency auditor helping Indian parents identify real concerns before choosing a school. You review school website data and flag genuine issues.
+
+HIGH severity = serious safety or legal compliance gap that could put a child at risk or mislead parents:
+- No mention of fire NOC / fire safety certificate
+- No anti-bullying policy anywhere on the site
+- No fee structure published (hidden fees risk)
+- Claims certifications without evidence
+
+MEDIUM severity = important missing information that affects parenting decisions:
+- Admission process vague or undocumented
+- No clear contact number or address
+- Academic calendar not published
+- No mention of transport safety or GPS tracking
+- Results/pass rates not published
+
+RULES:
+- Only flag genuine concerns backed by the provided facts
+- Do NOT flag things that are just "good to have" or marketing gaps
+- Write flag titles in plain English (max 7 words), reason in one clear sentence a parent would understand
+- Return { "flags": [] } if the school already covers the concern
+- Output valid JSON only`,
+          },
+          {
+            role: 'user',
+            content: `School facts extracted from their website:\n${factLines || 'No facts extracted.'}\n\nAlready identified flags (do NOT duplicate): [${existingTitles}]\n\nIdentify up to 2 additional red flags Indian parents should know about.\n\nRespond with JSON: { "flags": [ { "severity": "high"|"medium", "flag": "short title max 7 words", "reason": "one plain-English sentence for parents" } ] }`,
+          },
+        ],
+      });
+
+      const raw = completion.choices[0]?.message?.content ?? '{"flags":[]}';
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && Array.isArray((parsed as { flags?: unknown }).flags)) {
+        const aiFlags = ((parsed as { flags: unknown[] }).flags)
+          .filter((f): f is RuleFlag =>
+            f !== null && typeof f === 'object' &&
+            ['high', 'medium'].includes((f as RuleFlag).severity) &&
+            typeof (f as RuleFlag).flag === 'string' &&
+            typeof (f as RuleFlag).reason === 'string'
+          )
+          .slice(0, 2);
+        flags.push(...aiFlags);
+      }
+    } catch (_) { /* OpenAI is optional — silently skip */ }
+  }
+
+  const result = {
+    sessionId,
+    flags,
+    generatedAt: new Date().toISOString(),
+    fromCache: false,
+  };
+
+  // Cache for 1 hour so repeat clicks return instantly
+  try { await redis.setex(cacheKey, 3600, JSON.stringify(result)); } catch (_) {}
+
+  res.setHeader('Cache-Control', 'no-store');
+  return res.json(result);
 });
 
 /* ================================================================== */
@@ -654,6 +834,11 @@ app.get('/api/scan/:id/events', async (req, res) => {
 /* ================================================================== */
 
 app.get('/api/scan/:id', async (req, res) => {
+  // Prevent browser/proxy caching so polling always gets fresh status
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.removeHeader('ETag');
+
   const sessionId = req.params.id;
 
   // Fetch session
@@ -1076,15 +1261,30 @@ app.post('/api/scan/:id/ask', async (req, res) => {
   }
 
   // Find the most relevant content chunks for this question
-  const { relevant, sources } = findRelevantContent(fullContent, question);
+  const { relevant, sources } = findRelevantContent(fullContent, question, 28_000);
 
-  const fallback = 'This information was not found on your website. Recommended addition: add a dedicated section with this answer.';
+  const noContentFallback = 'This information was not found on the school website. You may want to contact the school directly.';
 
-  let answer = fallback;
+  let answer: string;
   try {
-    answer = (await aiAnswer(question, relevant)) || fallback;
+    const aiResult = await aiAnswer(question, relevant);
+    if (aiResult && aiResult.trim().length > 0) {
+      answer = aiResult;
+    } else {
+      // AI returned nothing — use extracted content if we found any
+      answer = buildFallbackFromContent(question, sources);
+    }
   } catch {
-    answer = fallback;
+    // AI threw — use extracted content if we found any
+    answer = buildFallbackFromContent(question, sources);
+  }
+
+  // Safety net: if answer still looks like a hard "not found" but we have sources, replace it
+  const looksLikeNotFound = /not found|no information|not mentioned|not available|not clearly/i.test(answer);
+  if (looksLikeNotFound && sources.length > 0) {
+    const aiSaidNotFound = answer;
+    const extracted = buildFallbackFromContent(question, sources);
+    answer = extracted + `\n\n(AI note: ${aiSaidNotFound})`;
   }
 
   // Build citations from the relevant pages found
