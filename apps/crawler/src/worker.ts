@@ -48,12 +48,30 @@ function resolveRedisUrl(): string {
   return url;
 }
 
-const redisConnection = {
-  host: process.env.REDIS_HOST || undefined,
-  port: process.env.REDIS_PORT ? Number(process.env.REDIS_PORT) : undefined,
-  password: process.env.REDIS_PASSWORD || undefined,
-  url: resolveRedisUrl(),
-};
+function buildRedisConnection(): { host: string; port: number; username?: string; password?: string; tls?: Record<string, unknown>; maxRetriesPerRequest: null; enableReadyCheck: boolean } {
+  const raw = resolveRedisUrl();
+  try {
+    const parsed = new URL(raw);
+    const isTls = parsed.protocol === 'rediss:';
+    const conn = {
+      host: parsed.hostname,
+      port: parsed.port ? Number(parsed.port) : 6379,
+      username: decodeURIComponent(parsed.username || 'default'),
+      password: decodeURIComponent(parsed.password || ''),
+      tls: isTls ? {} as Record<string, unknown> : undefined,
+      maxRetriesPerRequest: null as null,
+      enableReadyCheck: true,
+    };
+    console.log(`[BOOT][REDIS] Parsed connection: host=${conn.host} port=${conn.port} tls=${isTls}`);
+    return conn;
+  } catch (err) {
+    console.error('[BOOT][REDIS] Failed to parse URL:', err instanceof Error ? err.message : err);
+    return { host: '127.0.0.1', port: 6379, maxRetriesPerRequest: null, enableReadyCheck: true };
+  }
+}
+
+console.log('[BOOT] Worker module loading — commit c0cff63+fix');
+const redisConnection = buildRedisConnection();
 
 const apiBaseUrl = process.env.CRAWLER_API_BASE_URL ?? 'http://localhost:3000';
 const internalApiKey = process.env.INTERNAL_API_KEY ?? 'change-me';
@@ -1418,6 +1436,7 @@ async function startLegacyListBridge(listName: string, queue: Queue): Promise<vo
   const client = new IORedis(redisUrl, {
     maxRetriesPerRequest: null,
     enableReadyCheck: false,
+    tls: redisUrl.startsWith('rediss://') ? {} : undefined,
   });
   bridgeClients.push(client);
 
