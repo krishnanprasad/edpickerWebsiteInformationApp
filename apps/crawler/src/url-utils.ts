@@ -47,29 +47,37 @@ const TIER_0_PATTERNS: RegExp[] = [
   /noc[-_]?certificate/i,
 ];
 
-/** Tier 1: must-crawl pages that parents care about most */
+/**
+ * Tier 1: must-crawl pages that parents care about most.
+ * Patterns use \b (word boundary) so keywords match anywhere in the path,
+ * e.g. /apl-curriculum, /school-about-us, /our-admissions etc.
+ */
 const TIER_1_PATTERNS: RegExp[] = [
-  /\/(about|about[-_]?us|aboutus)\b/i,
-  /\/(admission|admissions|apply)\b/i,
-  /\/(fee|fees|fee[-_]?structure)\b/i,
-  /\/(contact|contact[-_]?us|contactus|reach[-_]?us)\b/i,
-  /\/(safety|mandatory|disclosure)\b/i,
-  /\/(faculty|staff|teacher|teachers|principal|leadership)\b/i,
-  /\/(result|results|achievement|achievements|toppers)\b/i,
-  /\/(curriculum|academic|academics|programs|programme)\b/i,
+  /\b(about[-_]?us|aboutus|about)\b/i,
+  /\b(admissions?|apply|enrol(?:l?ment)?)\b/i,
+  /\b(fees?|fee[-_]?structure)\b/i,
+  /\b(contact[-_]?us|contactus|reach[-_]?us|contact)\b/i,
+  /\b(safety|mandatory|disclosure)\b/i,
+  /\b(faculty|staff|teachers?|principal|leadership|management)\b/i,
+  /\b(results?|achievements?|toppers)\b/i,
+  /\b(curriculum|academics?|programs?|programmes?|syllabus)\b/i,
 ];
 
-/** Tier 2: should-crawl pages with useful information */
+/**
+ * Tier 2: should-crawl pages with useful information.
+ * Same \b approach for prefix-tolerant matching.
+ */
 const TIER_2_PATTERNS: RegExp[] = [
-  /\/(infrastructure|facility|facilities)\b/i,
-  /\/(transport|bus|transportation)\b/i,
-  /\/(campus|virtual[-_]?tour)\b/i,
-  /\/(parent|parents|pta|ptm)\b/i,
-  /\/(cbse|icse|board)\b/i,
-  /\/(co[-_]?curricular|extracurricular|sports|activities|clubs)\b/i,
-  /\/(calendar|events|notices|circular)\b/i,
-  /\/(hostel|boarding|residential)\b/i,
-  /\/(alumni|placement)\b/i,
+  /\b(infrastructure|facilit(?:y|ies))\b/i,
+  /\b(transport|bus|transportation)\b/i,
+  /\b(campus|virtual[-_]?tour)\b/i,
+  /\b(parents?|pta|ptm)\b/i,
+  /\b(cbse|icse|board)\b/i,
+  /\b(co[-_]?curricular|extracurricular|sports|activities|clubs)\b/i,
+  /\b(calendar|events|notices|circular)\b/i,
+  /\b(hostel|boarding|residential)\b/i,
+  /\b(alumni|placement)\b/i,
+  /\b(framework|vision|mission)\b/i,
 ];
 
 /* ------------------------------------------------------------------ */
