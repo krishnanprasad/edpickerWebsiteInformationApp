@@ -695,6 +695,49 @@ function extractIdentity($: import('cheerio').CheerioAPI, _html: string, _url: s
     }
   }
 
+  // Fallback: "NAME, Principal" or "NAME Principal" without honorific (capitalized words only)
+  if (!identity.principalName) {
+    const noHonorificPatterns = [
+      // "RAJA SUNDARI N, Principal" or "Ramesh Kumar, Principal"
+      /([A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]*){0,4})\s*,?\s*(?:principal|head\s+(?:of\s+)?school|headmaster|headmistress)\b/i,
+      // "Principal: RAJA SUNDARI N" / "Principal - Ramesh Kumar"
+      /(?:principal|head\s+(?:of\s+)?school|headmaster|headmistress)\s*[:.–\-,]?\s*([A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]*){0,4})/,
+    ];
+    for (const pat of noHonorificPatterns) {
+      const m = bodyText.match(pat);
+      if (m?.[1]) {
+        const candidateName = m[1].trim().replace(/\s+/g, ' ');
+        if (candidateName.length >= 4 && candidateName.length <= 60
+            && !/\b(school|academy|vidya|mandhir|mandir|college|institute|foundation|desk|message|welcome)\b/i.test(candidateName)) {
+          identity.principalName = candidateName.slice(0, 80);
+          break;
+        }
+      }
+    }
+  }
+
+  // DOM-based: heading near "Principal" heading/text (for structured pages)
+  if (!identity.principalName) {
+    $('h1, h2, h3, h4, h5, strong, b').each((_, el) => {
+      if (identity.principalName) return;
+      const text = $(el).text().trim();
+      if (/^principal/i.test(text) && text.length < 40) {
+        // The adjacent heading or next sibling might be the name
+        const prev = $(el).prev('h1, h2, h3, h4, h5, strong, b, p').text().trim().replace(/\s+/g, ' ');
+        const next = $(el).next('h1, h2, h3, h4, h5, strong, b, p').text().trim().replace(/\s+/g, ' ');
+        for (const candidate of [prev, next]) {
+          if (!candidate || candidate.length < 3 || candidate.length > 60) continue;
+          if (/\b(school|academy|vidya|college|institute|foundation|desk|message|welcome|phone|email|address)\b/i.test(candidate)) continue;
+          // Must look like a name: capitalized words, no long sentences
+          if (/^[A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]*){0,4},?$/.test(candidate.replace(/,\s*$/, ''))) {
+            identity.principalName = candidate.replace(/,\s*$/, '').slice(0, 80);
+            return;
+          }
+        }
+      }
+    });
+  }
+
   /* -- Phone extraction -- */
   // First: tel: links
   const telLink = $('a[href^="tel:"]').first().attr('href');
@@ -877,6 +920,45 @@ function refineIdentity(existing: EarlyIdentity, $: import('cheerio').CheerioAPI
           break;
         }
       }
+    }
+    // Fallback: "NAME, Principal" without honorific
+    if (!existing.principalName) {
+      const noHonorificPatterns = [
+        /([A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]*){0,4})\s*,?\s*(?:principal|head\s+(?:of\s+)?school|headmaster|headmistress)\b/i,
+        /(?:principal|head\s+(?:of\s+)?school|headmaster|headmistress)\s*[:.–\-,]?\s*([A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]*){0,4})/,
+      ];
+      for (const pat of noHonorificPatterns) {
+        const m = bodyText.match(pat);
+        if (m?.[1]) {
+          const candidateName = m[1].trim().replace(/\s+/g, ' ');
+          if (candidateName.length >= 4 && candidateName.length <= 60
+              && !/\b(school|academy|vidya|mandhir|mandir|college|institute|foundation|desk|message|welcome)\b/i.test(candidateName)) {
+            existing.principalName = candidateName.slice(0, 80);
+            changed = true;
+            break;
+          }
+        }
+      }
+    }
+    // DOM-based: heading adjacent to "Principal" heading
+    if (!existing.principalName) {
+      $('h1, h2, h3, h4, h5, strong, b').each((_, el) => {
+        if (existing.principalName) return;
+        const text = $(el).text().trim();
+        if (/^principal/i.test(text) && text.length < 40) {
+          const prev = $(el).prev('h1, h2, h3, h4, h5, strong, b, p').text().trim().replace(/\s+/g, ' ');
+          const next = $(el).next('h1, h2, h3, h4, h5, strong, b, p').text().trim().replace(/\s+/g, ' ');
+          for (const candidate of [prev, next]) {
+            if (!candidate || candidate.length < 3 || candidate.length > 60) continue;
+            if (/\b(school|academy|vidya|college|institute|foundation|desk|message|welcome|phone|email|address)\b/i.test(candidate)) continue;
+            if (/^[A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]*){0,4},?$/.test(candidate.replace(/,\s*$/, ''))) {
+              existing.principalName = candidate.replace(/,\s*$/, '').slice(0, 80);
+              changed = true;
+              return;
+            }
+          }
+        }
+      });
     }
   }
 
