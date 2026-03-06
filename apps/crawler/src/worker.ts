@@ -24,6 +24,7 @@ import {
   hashUrl, SeenUrls,
 } from './url-utils.js';
 import { extractVisionMissionMotto } from './vm-extractor.js';
+import { getPatternConfig, initPatternConfig, isPatternConfigLoaded } from './pattern-config.js';
 
 import {
   fetchWithCheerio, fetchWithPlaywright, closePlaywrightBrowser,
@@ -72,6 +73,8 @@ function buildRedisConnection(): { host: string; port: number; username?: string
 }
 
 console.log('[BOOT] Worker module loading — commit c0cff63+fix');
+await initPatternConfig();
+console.log(`[BOOT][PATTERNS] Loaded markdown patterns: ${isPatternConfigLoaded() ? 'yes' : 'no'}`);
 const redisConnection = buildRedisConnection();
 
 const apiBaseUrl = process.env.CRAWLER_API_BASE_URL ?? 'http://localhost:3000';
@@ -695,6 +698,12 @@ function extractIdentity($: import('cheerio').CheerioAPI, _html: string, _url: s
   if (Object.keys(socialUrls).length > 0) identity.socialUrls = socialUrls;
 
   const bodyText = extractCleanText($);
+  const patternConfig = getPatternConfig();
+  const escapeRx = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const principalRolePattern = patternConfig.principalRoles.map(escapeRx).join('|') || 'principal|head\\s+(?:of\\s+)?school|headmaster|headmistress';
+  const principalBlockedPattern = patternConfig.principalBlockedRoles.map(escapeRx).join('|');
+  const phoneLabelPattern = patternConfig.phoneLabels.map(escapeRx).join('|') || 'phone|tel|contact|mobile';
+  const addressLabelPattern = patternConfig.addressLabels.map(escapeRx).join('|') || 'address|location';
 
   /* -- Principal extraction (strict principal-role matching) -- */
   const HONORIFIC = `(?:Mr\\.?|Mrs\\.?|Ms\\.?|Dr\\.?|Shri\\.?|Smt\\.?|Prof\\.?|Sri\\.?|Thiru\\.?)`;
@@ -702,16 +711,19 @@ function extractIdentity($: import('cheerio').CheerioAPI, _html: string, _url: s
   const NAME_PART = `${HONORIFIC}\\s+([A-Z](?:[a-z]+|\\.)?(?:\\s+[A-Z](?:[a-z]+|\\.)?){0,4})`;
   const principalPatterns = [
     // "Principal: Mrs. R. Kalaivani" or "Principal - Dr. Ramesh Kumar"
-    new RegExp(`(?:principal|head\\s+(?:of\\s+)?school|headmaster|headmistress)\\s*(?:[:,\\-–]|is|name)?\\s*${NAME_PART}`, 'i'),
+    new RegExp(`(?:${principalRolePattern})\\s*(?:[:,\\-]|is|name)?\\s*${NAME_PART}`, 'i'),
     // "Mrs. R. Kalaivani, Principal"
-    new RegExp(`${NAME_PART}\\s*,?\\s*(?:principal|head\\s+(?:of\\s+)?school|headmaster|headmistress)`, 'i'),
+    new RegExp(`${NAME_PART}\\s*,?\\s*(?:${principalRolePattern})`, 'i'),
   ];
   for (const pat of principalPatterns) {
     const m = bodyText.match(pat);
     if (m?.[1]) {
       const candidateName = m[1].trim().replace(/\s+/g, ' ');
       // Reject if the "name" is clearly a school/org name (contains school indicators)
-      if (!/\b(school|academy|vidya|mandhir|mandir|college|institute|foundation)\b/i.test(candidateName)) {
+      if (
+        !/\b(school|academy|vidya|mandhir|mandir|college|institute|foundation)\b/i.test(candidateName)
+        && (!principalBlockedPattern || !new RegExp(`\\b(?:${principalBlockedPattern})\\b`, 'i').test(candidateName))
+      ) {
         identity.principalName = candidateName.slice(0, 80);
         break;
       }
@@ -722,9 +734,9 @@ function extractIdentity($: import('cheerio').CheerioAPI, _html: string, _url: s
   if (!identity.principalName) {
     const noHonorificPatterns = [
       // "RAJA SUNDARI N, Principal" or "Ramesh Kumar, Principal"
-      /([A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]*){0,4})\s*,?\s*(?:principal|head\s+(?:of\s+)?school|headmaster|headmistress)\b/i,
+      new RegExp(`([A-Z][A-Za-z.]+(?:\\s+[A-Z][A-Za-z.]*){0,4})\\s*,?\\s*(?:${principalRolePattern})\\b`, 'i'),
       // "Principal: RAJA SUNDARI N" / "Principal - Ramesh Kumar"
-      /(?:principal|head\s+(?:of\s+)?school|headmaster|headmistress)\s*[:.–\-,]?\s*([A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]*){0,4})/,
+      new RegExp(`(?:${principalRolePattern})\\s*[:.\\-,]?\\s*([A-Z][A-Za-z.]+(?:\\s+[A-Z][A-Za-z.]*){0,4})`, 'i'),
     ];
     for (const pat of noHonorificPatterns) {
       const m = bodyText.match(pat);
@@ -751,8 +763,9 @@ function extractIdentity($: import('cheerio').CheerioAPI, _html: string, _url: s
         for (const candidate of [prev, next]) {
           if (!candidate || candidate.length < 3 || candidate.length > 60) continue;
           if (/\b(school|academy|vidya|college|institute|foundation|desk|message|welcome|phone|email|address)\b/i.test(candidate)) continue;
+          if (principalBlockedPattern && new RegExp(`\\b(?:${principalBlockedPattern})\\b`, 'i').test(candidate)) continue;
           // Must look like a name: capitalized words, no long sentences
-          if (/^[A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]*){0,4},?$/.test(candidate.replace(/,\s*$/, ''))) {
+          if (/^[A-Z][A-Za-z.]+(?:\\s+[A-Z][A-Za-z.]*){0,4},?$/.test(candidate.replace(/,\s*$/, ''))) {
             identity.principalName = candidate.replace(/,\s*$/, '').slice(0, 80);
             return;
           }
@@ -785,9 +798,9 @@ function extractIdentity($: import('cheerio').CheerioAPI, _html: string, _url: s
 
   if (!identity.phone) {
     const phonePatterns = [
-      /(?:phone|tel|call|contact|mob(?:ile)?)\s*(?:no\.?|number|#)?\s*[:.\-]?\s*(\+?91[\s\-]?\d[\d\s\-]{8,12}\d)/ig,
-      /(?:phone|tel|call|contact|mob(?:ile)?)\s*(?:no\.?|number|#)?\s*[:.\-]?\s*(0\d{2,4}[\s\-]?\d{6,8})/ig,
-      /(?:phone|tel|call|contact|mob(?:ile)?)\s*(?:no\.?|number|#)?\s*[:.\-]?\s*(\d{10})/ig,
+      new RegExp(`(?:${phoneLabelPattern}|mob(?:ile)?)\\s*(?:no\\.?|number|#)?\\s*[:.\\-]?\\s*(\\+?91[\\s\\-]?\\d[\\d\\s\\-]{8,12}\\d)`, 'ig'),
+      new RegExp(`(?:${phoneLabelPattern}|mob(?:ile)?)\\s*(?:no\\.?|number|#)?\\s*[:.\\-]?\\s*(0\\d{2,4}[\\s\\-]?\\d{6,8})`, 'ig'),
+      new RegExp(`(?:${phoneLabelPattern}|mob(?:ile)?)\\s*(?:no\\.?|number|#)?\\s*[:.\\-]?\\s*(\\d{10})`, 'ig'),
     ];
     for (const pat of phonePatterns) {
       const matches = [...bodyText.matchAll(pat)];
@@ -850,7 +863,7 @@ function extractIdentity($: import('cheerio').CheerioAPI, _html: string, _url: s
   }
   if (!identity.address) {
     // Pattern: Look for explicit "address:" / "location:" prefix + PIN code
-    const addrMatch = bodyText.match(/(?:address|location|located at|situated at|contact\s*(?:info|us)?)\s*[:.–\-]?\s*(.{10,200}?\b\d{6}\b)/i);
+    const addrMatch = bodyText.match(new RegExp(`(?:${addressLabelPattern}|located\\s+at|situated\\s+at|contact\\s*(?:info|us)?)\\s*[:.\\-]?\\s*(.{10,200}?\\b\\d{6}\\b)`, 'i'));
     if (addrMatch?.[1]) {
       identity.address = addrMatch[1].trim().replace(/\s+/g, ' ').slice(0, 200);
     }
@@ -906,6 +919,12 @@ function extractIdentity($: import('cheerio').CheerioAPI, _html: string, _url: s
 function refineIdentity(existing: EarlyIdentity, $: import('cheerio').CheerioAPI, pageUrl: string): boolean {
   let changed = false;
   const bodyText = extractCleanText($);
+  const patternConfig = getPatternConfig();
+  const escapeRx = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const principalRolePattern = patternConfig.principalRoles.map(escapeRx).join('|') || 'principal|head\\s+(?:of\\s+)?school|headmaster|headmistress';
+  const principalBlockedPattern = patternConfig.principalBlockedRoles.map(escapeRx).join('|');
+  const phoneLabelPattern = patternConfig.phoneLabels.map(escapeRx).join('|') || 'phone|tel|contact|mobile';
+  const addressLabelPattern = patternConfig.addressLabels.map(escapeRx).join('|') || 'address|location';
   const lowerUrl = pageUrl.toLowerCase();
 
   /* -- Principal from principal/about pages -- */
@@ -913,8 +932,8 @@ function refineIdentity(existing: EarlyIdentity, $: import('cheerio').CheerioAPI
     const HONORIFIC = `(?:Mr\\.?|Mrs\\.?|Ms\\.?|Dr\\.?|Shri\\.?|Smt\\.?|Prof\\.?|Sri\\.?|Thiru\\.?)`;
     const NAME_PART = `${HONORIFIC}\\s+([A-Z](?:[a-z]+|\\.)?(?:\\s+[A-Z](?:[a-z]+|\\.)?){0,4})`;
     const patterns = [
-      new RegExp(`(?:principal|head\\s*(?:of\\s+)?school|headmaster|headmistress)\\s*(?:[:,\\-–]|is|name)?\\s*${NAME_PART}`, 'i'),
-      new RegExp(`${NAME_PART}\\s*,?\\s*(?:principal|head\\s*(?:of\\s+)?school|headmaster|headmistress)`, 'i'),
+      new RegExp(`(?:${principalRolePattern})\\s*(?:[:,\\-]|is|name)?\\s*${NAME_PART}`, 'i'),
+      new RegExp(`${NAME_PART}\\s*,?\\s*(?:${principalRolePattern})`, 'i'),
       // On a principal page, just find an honorific + name (high confidence it's the principal)
       new RegExp(`${NAME_PART}`, 'i'),
     ];
@@ -922,7 +941,10 @@ function refineIdentity(existing: EarlyIdentity, $: import('cheerio').CheerioAPI
       const m = bodyText.match(pat);
       if (m?.[1]) {
         const candidateName = m[1].trim().replace(/\s+/g, ' ');
-        if (!/\b(school|academy|vidya|mandhir|mandir|college|institute|foundation)\b/i.test(candidateName)) {
+        if (
+        !/\b(school|academy|vidya|mandhir|mandir|college|institute|foundation)\b/i.test(candidateName)
+        && (!principalBlockedPattern || !new RegExp(`\\b(?:${principalBlockedPattern})\\b`, 'i').test(candidateName))
+      ) {
           existing.principalName = candidateName.slice(0, 80);
           changed = true;
           break;
@@ -932,8 +954,8 @@ function refineIdentity(existing: EarlyIdentity, $: import('cheerio').CheerioAPI
     // Fallback: "NAME, Principal" without honorific
     if (!existing.principalName) {
       const noHonorificPatterns = [
-        /([A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]*){0,4})\s*,?\s*(?:principal|head\s+(?:of\s+)?school|headmaster|headmistress)\b/i,
-        /(?:principal|head\s+(?:of\s+)?school|headmaster|headmistress)\s*[:.–\-,]?\s*([A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]*){0,4})/,
+        new RegExp(`([A-Z][A-Za-z.]+(?:\\s+[A-Z][A-Za-z.]*){0,4})\\s*,?\\s*(?:${principalRolePattern})\\b`, 'i'),
+        new RegExp(`(?:${principalRolePattern})\\s*[:.\\-,]?\\s*([A-Z][A-Za-z.]+(?:\\s+[A-Z][A-Za-z.]*){0,4})`, 'i'),
       ];
       for (const pat of noHonorificPatterns) {
         const m = bodyText.match(pat);
@@ -959,7 +981,8 @@ function refineIdentity(existing: EarlyIdentity, $: import('cheerio').CheerioAPI
           for (const candidate of [prev, next]) {
             if (!candidate || candidate.length < 3 || candidate.length > 60) continue;
             if (/\b(school|academy|vidya|college|institute|foundation|desk|message|welcome|phone|email|address)\b/i.test(candidate)) continue;
-            if (/^[A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]*){0,4},?$/.test(candidate.replace(/,\s*$/, ''))) {
+          if (principalBlockedPattern && new RegExp(`\\b(?:${principalBlockedPattern})\\b`, 'i').test(candidate)) continue;
+            if (/^[A-Z][A-Za-z.]+(?:\\s+[A-Z][A-Za-z.]*){0,4},?$/.test(candidate.replace(/,\s*$/, ''))) {
               existing.principalName = candidate.replace(/,\s*$/, '').slice(0, 80);
               changed = true;
               return;
@@ -972,23 +995,45 @@ function refineIdentity(existing: EarlyIdentity, $: import('cheerio').CheerioAPI
 
   /* -- Phone from contact/about pages -- */
   if (!existing.phone) {
+    const normalizeCandidatePhone = (raw: string): string | null => {
+      const compact = raw.replace(/[^\d+]/g, '').replace(/(?!^)\+/g, '');
+      if (!compact) return null;
+      const digits = compact.replace(/\D/g, '');
+      if (digits.length < 10 || digits.length > 13) return null;
+      if (/^(\d)\1+$/.test(digits)) return null;
+      if (digits === '1234567890' || digits === '0123456789') return null;
+      if (digits.length === 10 && !/^[6-9]\d{9}$/.test(digits)) return null;
+      if (digits.length === 12 && digits.startsWith('91') && !/^[6-9]\d{9}$/.test(digits.slice(2))) return null;
+      if (digits.length === 11 && digits.startsWith('0') && !/^[6-9]\d{9}$/.test(digits.slice(1))) return null;
+      if (compact.startsWith('+')) return `+${digits}`;
+      return digits;
+    };
+
     const telLink = $('a[href^="tel:"]').first().attr('href');
     if (telLink) {
-      existing.phone = telLink.replace('tel:', '').replace(/\s+/g, '').trim();
-      changed = true;
-    } else {
+      const normalized = normalizeCandidatePhone(telLink.replace('tel:', '').trim());
+      if (normalized) {
+        existing.phone = normalized;
+        changed = true;
+      }
+    }
+
+    if (!existing.phone) {
       const phonePatterns = [
-        /(?:phone|tel|call|contact|mob(?:ile)?)\s*(?:no\.?|number|#)?\s*[:.\-–]?\s*(\+?91[\s\-]?\d[\d\s\-]{8,12}\d)/i,
-        /(?:phone|tel|call|contact|mob(?:ile)?)\s*(?:no\.?|number|#)?\s*[:.\-–]?\s*(0\d{2,4}[\s\-]?\d{6,8})/i,
-        /(?:phone|tel|call|contact|mob(?:ile)?)\s*(?:no\.?|number|#)?\s*[:.\-–]?\s*(\d{10})/i,
+        new RegExp(`(?:${phoneLabelPattern}|mob(?:ile)?)\\s*(?:no\\.?|number|#)?\\s*[:.\\-]?\\s*(\\+?91[\\s\\-]?\\d[\\d\\s\\-]{8,12}\\d)`, 'ig'),
+        new RegExp(`(?:${phoneLabelPattern}|mob(?:ile)?)\\s*(?:no\\.?|number|#)?\\s*[:.\\-]?\\s*(0\\d{2,4}[\\s\\-]?\\d{6,8})`, 'ig'),
+        new RegExp(`(?:${phoneLabelPattern}|mob(?:ile)?)\\s*(?:no\\.?|number|#)?\\s*[:.\\-]?\\s*(\\d{10})`, 'ig'),
       ];
       for (const pat of phonePatterns) {
-        const m = bodyText.match(pat);
-        if (m?.[1]) {
-          existing.phone = m[1].replace(/\s+/g, ' ').trim();
+        const matches = [...bodyText.matchAll(pat)];
+        for (const m of matches) {
+          const normalized = normalizeCandidatePhone(m?.[1] || '');
+          if (!normalized) continue;
+          existing.phone = normalized;
           changed = true;
           break;
         }
+        if (existing.phone) break;
       }
     }
   }
@@ -1037,7 +1082,7 @@ function refineIdentity(existing: EarlyIdentity, $: import('cheerio').CheerioAPI
       });
     }
     if (!existing.address) {
-      const addrMatch = bodyText.match(/(?:address|location|located at|situated at|contact\s*(?:info|us)?)\s*[:.–\-]?\s*(.{10,200}?\b\d{6}\b)/i);
+      const addrMatch = bodyText.match(new RegExp(`(?:${addressLabelPattern}|located\\s+at|situated\\s+at|contact\\s*(?:info|us)?)\\s*[:.\\-]?\\s*(.{10,200}?\\b\\d{6}\\b)`, 'i'));
       if (addrMatch?.[1]) {
         existing.address = addrMatch[1].trim().replace(/\s+/g, ' ').slice(0, 200); changed = true;
       }

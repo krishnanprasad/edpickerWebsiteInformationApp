@@ -1,3 +1,5 @@
+import { getPatternConfig } from './pattern-config.js';
+
 export interface ExtractedVMRecord {
   value: string;
   confidence: 'high' | 'medium' | 'low';
@@ -18,6 +20,7 @@ export function extractVisionMissionMotto(
   bodyText: string
 ): VMResult {
   const lurl = pageUrl.toLowerCase();
+  const patternConfig = getPatternConfig();
   
   if (/\/(gallery|news|events|admissions?|fees?|page\/\d+)/.test(lurl)) return {};
 
@@ -67,9 +70,9 @@ export function extractVisionMissionMotto(
   const getHeadingTarget = (headingText: string) => {
     const t = headingText.replace(/\s+/g, ' ').trim().toLowerCase();
     if (t.length > 30) return null;
-    if (t === 'vision' || t === 'our vision') return 'vision';
-    if (t === 'mission' || t === 'our mission') return 'mission';
-    if (t === 'vision & mission' || t === 'vision and mission') return 'both';
+    if (patternConfig.visionHeadings.includes(t)) return t.includes('mission') ? 'both' : 'vision';
+    if (patternConfig.missionHeadings.includes(t)) return t.includes('vision') ? 'both' : 'mission';
+    if (t === 'vision & mission' || t === 'vision and mission' || t === 'mission & vision' || t === 'mission and vision') return 'both';
     if (t === 'motto' || t === 'our motto' || t === 'core values') return 'motto';
     return null;
   };
