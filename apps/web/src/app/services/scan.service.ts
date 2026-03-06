@@ -65,7 +65,7 @@ export class ScanService {
   }
 
   /**
-   * Poll scan status every `intervalMs` until status is Ready or Rejected.
+   * Poll scan status every `intervalMs` until status is terminal.
    * Emits each intermediate response so the UI can show progress.
    * Stops after maxPolls attempts (~5 minutes at 2s intervals).
    */
@@ -97,6 +97,6 @@ export class ScanService {
   }
 
   private isTerminal(status: ScanStatus): boolean {
-    return status === 'Ready' || status === 'Rejected' || status === 'Failed' || status === 'Error';
+    return status === 'Ready' || status === 'Rejected' || status === 'Uncertain' || status === 'Failed' || status === 'Error';
   }
 }

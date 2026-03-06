@@ -88,7 +88,7 @@ function requireInternalKey(req: express.Request, res: express.Response): boolea
 }
 
 function isTerminalStatus(status: string): boolean {
-  return status === 'Ready' || status === 'Rejected' || status === 'Failed' || status === 'Error';
+  return status === 'Ready' || status === 'Rejected' || status === 'Uncertain' || status === 'Failed' || status === 'Error';
 }
 
 function computeStaleness(completedAt: Date | null, staleDays = 7): { isStale: boolean; ageDays: number } {
@@ -884,12 +884,14 @@ app.get('/api/scan/:id', async (req, res) => {
     };
   }
 
-  // If rejected, return early with message
-  if (status === 'Rejected') {
+  // If rejected/uncertain, return early with message
+  if (status === 'Rejected' || status === 'Uncertain') {
     const cls = response.classification as { rejectionReasons?: string[] } | undefined;
-    response.message = cls?.rejectionReasons?.length
-      ? 'We could not confidently verify this as an educational website. See the detailed reasons below.'
-      : 'This website does not appear to be an educational institution. SchoolLens currently supports school and educational website analysis only.';
+    response.message = status === 'Uncertain'
+      ? 'This site may be a school, but homepage signals are not strong enough yet. Please review details below or retry after content updates.'
+      : (cls?.rejectionReasons?.length
+          ? 'We could not confidently verify this as an educational website. See the detailed reasons below.'
+          : 'This website does not appear to be an educational institution. SchoolLens currently supports school and educational website analysis only.');
     return res.json(response);
   }
 
@@ -1015,6 +1017,12 @@ app.post('/internal/classify-result', async (req, res) => {
     [sessionId, isEducational, confidence, JSON.stringify(classificationData)],
   );
 
+  const matched = (matchedKeywords || []).map((k) => String(k).toLowerCase());
+  const hasSchoolLikeSignal = matched.some((k) =>
+    ['school', 'academy', 'institute', 'college', 'university', 'vidyalaya', 'convent'].some((t) => k.includes(t)),
+  );
+  const isUncertain = !isEducational && (confidence >= 15 || hasSchoolLikeSignal);
+
   if (isEducational) {
     // Update status to Crawling and enqueue full crawl
     await pgPool.query("UPDATE analysis_sessions SET status = 'Crawling' WHERE id = $1", [sessionId]);
@@ -1023,6 +1031,9 @@ app.post('/internal/classify-result', async (req, res) => {
       url,
       maxPages: maxPages || Number(process.env.CRAWLER_MAX_PAGES || 30),
     });
+  } else if (isUncertain) {
+    // Borderline case: don't hard reject when homepage has partial school signals.
+    await pgPool.query("UPDATE analysis_sessions SET status = 'Uncertain', completed_at = NOW() WHERE id = $1", [sessionId]);
   } else {
     // Reject — not an educational institution
     await pgPool.query("UPDATE analysis_sessions SET status = 'Rejected', completed_at = NOW() WHERE id = $1", [sessionId]);

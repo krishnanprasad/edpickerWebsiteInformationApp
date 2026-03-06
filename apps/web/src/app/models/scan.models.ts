@@ -2,7 +2,7 @@
 /*  SchoolLens API response types                                      */
 /* ------------------------------------------------------------------ */
 
-export type ScanStatus = 'Classifying' | 'Crawling' | 'Scoring' | 'Ready' | 'Rejected' | 'Failed' | 'Error';
+export type ScanStatus = 'Classifying' | 'Crawling' | 'Scoring' | 'Ready' | 'Rejected' | 'Uncertain' | 'Failed' | 'Error';
 export type TransparencyLevel = 'Low' | 'Moderate' | 'High';
 
 export interface SchoolIdentity {
@@ -113,7 +113,7 @@ export interface ScanResponse {
 
   // Classification
   classification?: Classification;
-  message?: string; // only when Rejected
+  message?: string; // only when Rejected / Uncertain
 
   // Early identity (homepage-extracted, available during Crawling)
   earlyIdentity?: EarlyIdentity;

@@ -82,7 +82,8 @@ import { SchoolIdentity, ScanResponse, ScanStatus, SSEEvent, RedFlagsResponse, R
           </app-scan-progress>
 
           <app-classification-check
-            *ngIf="homeScan?.status === 'Rejected'"
+            *ngIf="homeScan?.status === 'Rejected' || homeScan?.status === 'Uncertain'"
+            [status]="homeScan?.status === 'Uncertain' ? 'Uncertain' : 'Rejected'"
             [classification]="homeScan?.classification || null"
             (retry)="resetHome()">
           </app-classification-check>
@@ -234,6 +235,7 @@ import { SchoolIdentity, ScanResponse, ScanStatus, SSEEvent, RedFlagsResponse, R
 
                 <div class="slot-status" *ngIf="isInProgress(s.item.status)">⏳ Analysis running, ready in ~30s</div>
                 <div class="slot-status blocked" *ngIf="s.item.status === 'Rejected'">Blocked: Not an educational institution</div>
+                <div class="slot-status blocked" *ngIf="s.item.status === 'Uncertain'">Needs review: School signals are partial</div>
                 <div class="slot-status saved" *ngIf="s.item.status === 'Ready'">✓ Saved to Compare</div>
 
                 <div class="slot-actions">
@@ -1458,7 +1460,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   isTerminal(status: string): boolean {
-    return status === 'Ready' || status === 'Rejected' || status === 'Failed' || status === 'Error';
+    return status === 'Ready' || status === 'Rejected' || status === 'Uncertain' || status === 'Failed' || status === 'Error';
   }
 
   private safeHostnameLabel(url: string | undefined | null): string {

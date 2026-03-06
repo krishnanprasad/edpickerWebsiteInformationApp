@@ -394,6 +394,7 @@ export class ScanInputComponent {
       case 'Classifying': return 'Checking website...';
       case 'Crawling': return 'Reading pages...';
       case 'Scoring': return 'Preparing summary...';
+      case 'Uncertain': return 'Needs quick review...';
       default: return '';
     }
   }

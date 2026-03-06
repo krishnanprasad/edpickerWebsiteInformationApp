@@ -432,6 +432,24 @@ async function classifyUrl(url: string): Promise<{
     console.error('Classification fetch failed:', err instanceof Error ? err.message : err);
   }
 
+  const hasThinText = bodyText.trim().length < 80;
+  if (hasThinText) {
+    try {
+      // Many modern school sites are JS-heavy SPAs; render once before rejecting.
+      const pw = await fetchWithPlaywright(url, 25_000);
+      if (pw.title?.trim()) pageTitle = pw.title.trim();
+      if (pw.text?.trim()) bodyText = pw.text.trim();
+      if (pw.html) {
+        const hrefs = pw.html.match(/href=["']([^"']*)["']/gi) ?? [];
+        hrefText = `${hrefText} ${hrefs.join(' ')}`.trim();
+      }
+      fetchFailed = false;
+      console.log(`[CLASSIFY] Playwright fallback used for ${url} (textLen=${bodyText.length})`);
+    } catch (pwErr) {
+      console.warn('[CLASSIFY] Playwright fallback failed:', pwErr instanceof Error ? pwErr.message : pwErr);
+    }
+  }
+
   const combined = `${pageTitle} ${metaDescription} ${bodyText} ${hrefText}`.toLowerCase();
   const matched = EDUCATION_KEYWORDS.filter((kw) => combined.includes(kw));
 

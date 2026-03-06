@@ -8,22 +8,17 @@ import { Classification } from '../models/scan.models';
   standalone: true,
   imports: [CommonModule, MatIconModule],
   template: `
-    <!-- Only show for rejection -->
     <div class="reject-wrap" *ngIf="classification && !classification.isEducational">
       <div class="reject-card">
         <div class="reject-header">
-          <span class="reject-emoji">⚠️</span>
-          <h2>We Couldn't Verify This as a School</h2>
+          <span class="reject-emoji">!</span>
+          <h2>{{ title }}</h2>
         </div>
 
-        <p class="parent-note">
-          We weren't able to find enough educational information on this website
-          to prepare a useful summary for you. This doesn't mean the school is bad —
-          their website may just not share enough detail online.
-        </p>
+        <p class="parent-note">{{ parentNote }}</p>
 
         <div class="reasons-section">
-          <h4>Here's what we noticed:</h4>
+          <h4>Here is what we noticed:</h4>
           <ul class="reasons-list">
             <li *ngFor="let reason of getReasons()">
               <mat-icon class="reason-icon">arrow_forward</mat-icon>
@@ -45,9 +40,7 @@ import { Classification } from '../models/scan.models';
           </span>
         </div>
 
-        <button class="try-again-btn" (click)="retry.emit()">
-          Try Another School
-        </button>
+        <button class="try-again-btn" (click)="retry.emit()">Try Another School</button>
       </div>
     </div>
   `,
@@ -122,7 +115,21 @@ import { Classification } from '../models/scan.models';
 })
 export class ClassificationCheckComponent {
   @Input() classification: Classification | null = null;
+  @Input() status: 'Rejected' | 'Uncertain' = 'Rejected';
   @Output() retry = new EventEmitter<void>();
+
+  get title(): string {
+    return this.status === 'Uncertain'
+      ? 'We Need a Quick Review for This School'
+      : 'We Could Not Verify This as a School';
+  }
+
+  get parentNote(): string {
+    if (this.status === 'Uncertain') {
+      return 'This website shows some school-like signals, but not enough clear educational information yet. It may still be a valid school site.';
+    }
+    return 'We were not able to find enough educational information on this website to prepare a useful summary for you. This does not mean the school is bad.';
+  }
 
   getReasons(): string[] {
     if (!this.classification) return [];
@@ -140,7 +147,7 @@ export class ClassificationCheckComponent {
     }
     reasons.push('The website may use pop-ups or JavaScript that prevents reading content.');
     reasons.push('We could not find clear information about admissions, curriculum, or board affiliation.');
-    reasons.push('The site may be a coaching centre, business portal, or non-school service.');
+    reasons.push('The site may be a coaching center, business portal, or non-school service.');
     reasons.push('If this is a real school, the website might benefit from clearer information for parents.');
     return reasons.slice(0, 5);
   }

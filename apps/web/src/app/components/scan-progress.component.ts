@@ -195,6 +195,9 @@ export class ScanProgressComponent implements OnInit, OnDestroy {
   }
 
   get currentIdx(): number {
+    if (this.status === 'Rejected' || this.status === 'Uncertain') {
+      return this.stepOrder.length - 1;
+    }
     const i = this.stepOrder.indexOf(this.status);
     return i >= 0 ? i : 0;
   }
@@ -209,6 +212,7 @@ export class ScanProgressComponent implements OnInit, OnDestroy {
       case 'Crawling': return 'Reading school information…';
       case 'Scoring': return 'Preparing your summary…';
       case 'Ready': return 'Your summary is ready!';
+      case 'Uncertain': return 'We need a quick review';
       case 'Rejected': return 'We couldn\'t verify this school';
       default: return 'Working on it…';
     }
@@ -223,8 +227,10 @@ export class ScanProgressComponent implements OnInit, OnDestroy {
       }
       case 'Scoring': return 'Organising what we found into a clear summary for you';
       case 'Ready': return 'Scroll down to see everything we found';
+      case 'Uncertain': return 'This may be a school, but we need stronger educational signals to continue automatically';
       case 'Rejected': return 'This doesn\'t appear to be a school website';
       default: return '';
     }
   }
 }
+
