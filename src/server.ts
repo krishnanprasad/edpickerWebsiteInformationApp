@@ -419,7 +419,7 @@ async function upsertSchoolFromSession(params: {
     const slug = await buildUniqueSlug(baseSlug);
     const inserted = await pgPool.query(
       `INSERT INTO schools (name, slug, website_url, raw_input_url, crawl_status, data_source, last_crawled_at, crawl_fail_reason)
-       VALUES ($1, $2, $3, $4, $5, 'crawl', CASE WHEN $5 IN ('analysed','partial') THEN NOW() ELSE NULL END, $6)
+       VALUES ($1, $2, $3, $4, $5::text, 'crawl', CASE WHEN $5::text IN ('analysed','partial') THEN NOW() ELSE NULL END, $6::text)
        RETURNING id`,
       [extractedName, slug, websiteUrl, sourceUrl, crawlStatus, crawlFailReason || null],
     );
@@ -428,10 +428,10 @@ async function upsertSchoolFromSession(params: {
     schoolId = String(schoolRes.rows[0].id);
     await pgPool.query(
       `UPDATE schools
-       SET crawl_status = $2,
-           last_crawled_at = CASE WHEN $2 IN ('analysed','partial') THEN NOW() ELSE last_crawled_at END,
-           crawl_fail_reason = $3,
-           raw_input_url = COALESCE(raw_input_url, $4),
+       SET crawl_status = $2::text,
+           last_crawled_at = CASE WHEN $2::text IN ('analysed','partial') THEN NOW() ELSE last_crawled_at END,
+           crawl_fail_reason = $3::text,
+           raw_input_url = COALESCE(raw_input_url, $4::text),
            updated_at = NOW()
        WHERE id = $1`,
       [schoolId, crawlStatus, crawlFailReason || null, sourceUrl],
@@ -1544,10 +1544,15 @@ app.post('/internal/crawl-result', async (req, res) => {
   );
 
   const persistentStatus = derivePersistentCrawlStatus(scanConfidence, scanConfidenceLabel, facts?.length || 0, pagesScanned);
-  await upsertSchoolFromSession({
-    sessionId,
-    crawlStatus: persistentStatus,
-  });
+  try {
+    await upsertSchoolFromSession({
+      sessionId,
+      crawlStatus: persistentStatus,
+    });
+  } catch (error) {
+    // Keep crawl pipeline running even if persistent school upsert fails.
+    console.error('[schools-upsert:crawl-result] failed', { sessionId, error });
+  }
 
   // Enqueue scoring
   await scoringQueue.add('score-job', { sessionId, url: pageUrl, extractedText });
@@ -1641,11 +1646,16 @@ app.post('/internal/score-complete', async (req, res) => {
     ],
   );
 
-  await upsertSchoolFromSession({
-    sessionId,
-    crawlStatus: 'analysed',
-    summaryText: summary,
-  });
+  try {
+    await upsertSchoolFromSession({
+      sessionId,
+      crawlStatus: 'analysed',
+      summaryText: summary,
+    });
+  } catch (error) {
+    // Do not fail score completion if schools registry update fails.
+    console.error('[schools-upsert:score-complete] failed', { sessionId, error });
+  }
 
   // Cache
   await redis.set(`analysis:v1:${urlHash}`, sessionId, 'EX', 86400);
@@ -1668,11 +1678,15 @@ app.post('/internal/crawl-failed', async (req, res) => {
     [sessionId],
   );
 
-  await upsertSchoolFromSession({
-    sessionId,
-    crawlStatus: 'failed',
-    crawlFailReason: cleanText(reason, 500) || 'Crawler failed',
-  });
+  try {
+    await upsertSchoolFromSession({
+      sessionId,
+      crawlStatus: 'failed',
+      crawlFailReason: cleanText(reason, 500) || 'Crawler failed',
+    });
+  } catch (error) {
+    console.error('[schools-upsert:crawl-failed] failed', { sessionId, error });
+  }
 
   res.json({ ok: true });
 });
