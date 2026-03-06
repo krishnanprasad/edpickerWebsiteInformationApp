@@ -14,6 +14,7 @@ import { ScanProgressComponent } from './components/scan-progress.component';
 import { SchoolIdentityComponent } from './components/school-identity.component';
 
 import { CompareService } from './services/compare.service';
+import { CrashHandlerService } from './services/crash-handler.service';
 import { ScanService } from './services/scan.service';
 import { CompareApiError, CompareListSlot, CompareSlotNumber } from './models/compare.models';
 import { SchoolIdentity, ScanResponse, ScanStatus, SSEEvent, RedFlagsResponse, RedFlag } from './models/scan.models';
@@ -355,12 +356,51 @@ import { SchoolIdentity, ScanResponse, ScanStatus, SSEEvent, RedFlagsResponse, R
           </aside>
         </section>
       </main>
+
+      <div class="crash-modal-overlay" *ngIf="crashModalOpen">
+        <div class="crash-modal">
+          <div class="crash-modal-title">{{ crashTitle }}</div>
+          <div class="crash-modal-message">{{ crashMessage }}</div>
+          <button class="primary-btn" (click)="closeCrashModal()">Back to Home</button>
+        </div>
+      </div>
     </div>
   `,
   styles: [`
     :host { display: block; background: var(--sl-bg, #f8f9fa); min-height: 100vh; }
 
     .shell { min-height: 100vh; }
+
+    .crash-modal-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 1200;
+      background: rgba(15, 23, 42, 0.45);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .crash-modal {
+      width: min(460px, 100%);
+      background: #fff;
+      border-radius: 14px;
+      box-shadow: 0 14px 40px rgba(0, 0, 0, 0.22);
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .crash-modal-title {
+      font-size: 20px;
+      font-weight: 800;
+      color: var(--sl-text, #212121);
+    }
+    .crash-modal-message {
+      font-size: 14px;
+      color: var(--sl-text-muted, #616161);
+      line-height: 1.5;
+    }
 
     .topbar {
       position: sticky;
@@ -906,6 +946,7 @@ import { SchoolIdentity, ScanResponse, ScanStatus, SSEEvent, RedFlagsResponse, R
 })
 export class AppComponent implements OnInit, OnDestroy {
   private readonly compareService = inject(CompareService);
+  private readonly crashHandler = inject(CrashHandlerService);
   private readonly scanService = inject(ScanService);
 
   @ViewChild('homeAskBox') homeAskBox?: AskBoxComponent;
@@ -948,6 +989,19 @@ export class AppComponent implements OnInit, OnDestroy {
 
   private homePollSub: Subscription | null = null;
   private homeSseSub: Subscription | null = null;
+  private crashSub: Subscription | null = null;
+
+  crashModalOpen = false;
+  crashTitle = 'We are repairing it';
+  crashMessage = 'Something broke unexpectedly. Please return to Home while we fix it.';
+
+  private readonly onWindowError = () => {
+    this.crashHandler.report('Something broke unexpectedly. Please return to Home while we fix it.');
+  };
+
+  private readonly onUnhandledRejection = () => {
+    this.crashHandler.report('Something broke unexpectedly. Please return to Home while we fix it.');
+  };
 
   slots: CompareListSlot[] = [
     { slot: 1, item: null },
@@ -1073,6 +1127,17 @@ export class AppComponent implements OnInit, OnDestroy {
     if (window.innerWidth >= 1000) {
       this.metricGroups.forEach((_, i) => this.openAccordionIds.add(i));
     }
+
+    this.crashSub?.unsubscribe();
+    this.crashSub = this.crashHandler.crash$.subscribe((ev) => {
+      this.crashTitle = ev.title;
+      this.crashMessage = ev.message;
+      this.crashModalOpen = true;
+      this.goHome();
+    });
+
+    window.addEventListener('error', this.onWindowError);
+    window.addEventListener('unhandledrejection', this.onUnhandledRejection);
   }
 
   toggleAccordion(index: number) {
@@ -1097,6 +1162,16 @@ export class AppComponent implements OnInit, OnDestroy {
     this.homePollSub = null;
     this.homeSseSub?.unsubscribe();
     this.homeSseSub = null;
+    this.crashSub?.unsubscribe();
+    this.crashSub = null;
+    window.removeEventListener('error', this.onWindowError);
+    window.removeEventListener('unhandledrejection', this.onUnhandledRejection);
+  }
+
+  closeCrashModal() {
+    this.crashModalOpen = false;
+    this.crashHandler.clear();
+    this.goHome();
   }
 
   goHome() {

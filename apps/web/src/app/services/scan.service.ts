@@ -2,11 +2,13 @@ import { Injectable, inject, NgZone } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable, interval, switchMap, takeWhile, map, startWith } from 'rxjs';
 import { ScanResponse, AskResponse, B2bInterestResponse, ScanStatus, SSEEvent, SSEEventType, RedFlagsResponse } from '../models/scan.models';
+import { CrashHandlerService } from './crash-handler.service';
 
 @Injectable({ providedIn: 'root' })
 export class ScanService {
   private readonly http = inject(HttpClient);
   private readonly zone = inject(NgZone);
+  private readonly crashHandler = inject(CrashHandlerService);
 
   /** Submit a URL for scanning (returns sessionId + initial status). */
   submitScan(url: string): Observable<ScanResponse> {
@@ -53,6 +55,7 @@ export class ScanService {
 
       eventSource.onerror = () => {
         this.zone.run(() => {
+          this.crashHandler.report('Live updates disconnected. Please return to Home while we repair it.');
           eventSource.close();
           subscriber.complete();
         });

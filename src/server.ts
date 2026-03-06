@@ -5,7 +5,6 @@ import express from 'express';
 import { Queue } from 'bullmq';
 import { z } from 'zod';
 import OpenAI from 'openai';
-import Redis from 'ioredis';
 import { pgPool, redis } from './db.js';
 import { FileStorageService } from './storage.js';
 
@@ -1184,31 +1183,33 @@ app.get('/api/scan/:id/events', async (req, res) => {
   } catch { /* stream may not exist yet */ }
 
   // 2. Subscribe to live channel
-  const redisUrl = process.env.REDIS_URL;
-  const subscriber = redisUrl ? new Redis(redisUrl) : new Redis({
-    host: process.env.REDIS_HOST || 'localhost',
-    port: Number(process.env.REDIS_PORT || 6379),
-    password: process.env.REDIS_PASSWORD || undefined,
-  });
-
   const channel = `sse:live:${sessionId}`;
-  await subscriber.subscribe(channel);
+  const subscriber = redis.duplicate();
+  let liveSubscribed = false;
+  try {
+    await subscriber.subscribe(channel);
+    liveSubscribed = true;
+  } catch {
+    // Keep stream open with heartbeat + replay even if live subscription fails.
+  }
 
-  subscriber.on('message', (_ch: string, message: string) => {
-    try {
-      const parsed = JSON.parse(message);
-      res.write(`event: ${parsed.type || 'message'}\ndata: ${JSON.stringify(parsed.data || {})}\n\n`);
+  if (liveSubscribed) {
+    subscriber.on('message', (_ch: string, message: string) => {
+      try {
+        const parsed = JSON.parse(message);
+        res.write(`event: ${parsed.type || 'message'}\ndata: ${JSON.stringify(parsed.data || {})}\n\n`);
 
-      // Auto-close on terminal events
-      if (parsed.type === 'complete' || parsed.type === 'error') {
-        setTimeout(() => {
-          subscriber.unsubscribe(channel).catch(() => {});
-          subscriber.quit().catch(() => {});
-          res.end();
-        }, 500);
-      }
-    } catch { /* ignore malformed */ }
-  });
+        // Auto-close on terminal events
+        if (parsed.type === 'complete' || parsed.type === 'error') {
+          setTimeout(() => {
+            subscriber.unsubscribe(channel).catch(() => {});
+            subscriber.quit().catch(() => {});
+            res.end();
+          }, 500);
+        }
+      } catch { /* ignore malformed */ }
+    });
+  }
 
   // Heartbeat to keep connection alive
   const keepAlive = setInterval(() => {
