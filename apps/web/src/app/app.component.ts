@@ -1238,6 +1238,7 @@ export class AppComponent implements OnInit, OnDestroy {
       foundingYear: early.foundingYear ? String(early.foundingYear) : null,
       vision: early.vision ? String(early.vision) : null,
       mission: early.mission ? String(early.mission) : null,
+      motto: early.motto ? String(early.motto) : null,
       socialUrls: early.socialUrls ? early.socialUrls : null,
     };
   }

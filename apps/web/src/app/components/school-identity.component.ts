@@ -63,16 +63,23 @@ import {
         </a>
       </div>
 
+      <!-- Motto -->
+      <div class="motto-row fade-in" *ngIf="identity.motto">
+        <span class="motto-text">"{{ identity.motto }}"</span>
+      </div>
+
       <!-- Vision -->
-      <div class="vision-row fade-in" *ngIf="identity.vision">
+      <div class="vision-row fade-in">
         <span class="vision-label">Vision:</span>
-        <span class="vision-text">{{ identity.vision }}</span>
+        <span class="vision-text" *ngIf="identity.vision">{{ identity.vision }}</span>
+        <span class="vision-text empty" *ngIf="!identity.vision">Not published on website</span>
       </div>
 
       <!-- Mission -->
-      <div class="vision-row fade-in" *ngIf="identity.mission">
+      <div class="vision-row fade-in">
         <span class="vision-label">Mission:</span>
-        <span class="vision-text">{{ identity.mission }}</span>
+        <span class="vision-text" *ngIf="identity.mission">{{ identity.mission }}</span>
+        <span class="vision-text empty" *ngIf="!identity.mission">Not published on website</span>
       </div>
 
       <div class="transparency-row" *ngIf="overallScore > 0">
@@ -170,6 +177,20 @@ import {
       margin-right: 6px;
     }
     .vision-text { color: #424242; }
+    .vision-text.empty { font-style: italic; color: #9e9e9e; }
+
+    .motto-row {
+      margin: 16px 0;
+      padding-left: 16px;
+      border-left: 3px solid #1a237e;
+    }
+    .motto-text {
+      font-size: 15px;
+      font-style: italic;
+      color: #3f51b5;
+      font-weight: 500;
+      line-height: 1.4;
+    }
 
     .transparency-row {
       display: flex; align-items: center; gap: 10px;

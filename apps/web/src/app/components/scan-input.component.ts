@@ -3,6 +3,7 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
 import { ScanStatus } from '../models/scan.models';
+import { normalizeSchoolUrl } from '../utils/url-normalizer';
 
 @Component({
   selector: 'app-scan-input',
@@ -71,7 +72,7 @@ import { ScanStatus } from '../models/scan.models';
 
         <p class="tagline-sub">Get an honest analysis in 30 seconds.</p>
         <p *ngIf="error" class="error-text">{{ error }}</p>
-        <p *ngIf="cityMessage" class="city-message">{{ cityMessage }}</p>
+        <p *ngIf="infoMessage" class="info-message">{{ infoMessage }}</p>
 
         <div class="hero-actions">
           <a class="link-btn" (click)="showHow = !showHow">
@@ -253,7 +254,7 @@ import { ScanStatus } from '../models/scan.models';
       font-size: 13px;
       margin: 10px 0 0;
     }
-    .city-message {
+    .info-message {
       color: rgba(255,255,255,0.85);
       font-size: 13px;
       margin: 8px 0 0;
@@ -367,7 +368,7 @@ export class ScanInputComponent {
 
   url = '';
   city = '';
-  cityMessage = '';
+  infoMessage = '';
   scanning = false;
   error = '';
   showHow = false;
@@ -399,22 +400,40 @@ export class ScanInputComponent {
 
   onScan() {
     if (!this.url.trim()) return;
-    let testUrl = this.url.trim();
-    if (!/^https?:\/\//i.test(testUrl)) testUrl = 'https://' + testUrl;
-    try {
-      new URL(testUrl);
-    } catch {
-      this.error = 'Please enter a valid school website address';
+
+    const norm = normalizeSchoolUrl(this.url);
+    
+    // Handle validation / error cases from normalizer
+    if (norm.error) {
+      this.error = norm.error;
+      this.infoMessage = '';
       return;
     }
+
+    // Update the input to show the clean domain
+    this.url = norm.normalized;
     this.error = '';
+
+    // If there was a major cleanup, we show a message and pause so they can edit.
+    if (norm.wasGoogleAd || norm.hadTrackingParams || norm.hadDeepLink) {
+      this.infoMessage = 'We cleaned up the link to the root domain. Edit if needed, or click Check School again to proceed.';
+      // Do not auto-submit if it was deeply modified (gives option to edit)
+      // We know it is safe to proceed next click because tracking/deeplinks are gone
+      return; 
+    }
+
+    this.infoMessage = '';
     this.scanning = true;
+    
+    let testUrl = this.url.trim();
+    if (!/^https?:\/\//i.test(testUrl)) testUrl = 'https://' + testUrl;
+
     this.scanUrl.emit(testUrl);
   }
 
   onCitySearch() {
     if (!this.city.trim()) return;
-    this.cityMessage = `City/PIN search coming soon. In the meantime, paste the school's website URL below.`;
+    this.infoMessage = `City/PIN search coming soon. In the meantime, paste the school's website URL below.`;
   }
 
   onReset() {
@@ -422,7 +441,7 @@ export class ScanInputComponent {
     this.error = '';
     this.url = '';
     this.city = '';
-    this.cityMessage = '';
+    this.infoMessage = '';
     this.reset.emit();
   }
 }

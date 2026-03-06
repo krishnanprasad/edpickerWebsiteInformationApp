@@ -23,6 +23,7 @@ import {
   canonicalizeUrl, shouldSkipUrl, classifyUrlTier,
   hashUrl, SeenUrls,
 } from './url-utils.js';
+import { extractVisionMissionMotto } from './vm-extractor.js';
 
 import {
   fetchWithCheerio, fetchWithPlaywright, closePlaywrightBrowser,
@@ -551,6 +552,10 @@ interface EarlyIdentity {
   foundingYear?: string;
   vision?: string;
   mission?: string;
+  motto?: string;
+  visionConfidence?: 'high' | 'medium' | 'low';
+  missionConfidence?: 'high' | 'medium' | 'low';
+  mottoConfidence?: 'high' | 'medium' | 'low';
   socialUrls?: Record<string, string>;
   phone?: string;
   email?: string;
@@ -839,53 +844,19 @@ function extractIdentity($: import('cheerio').CheerioAPI, _html: string, _url: s
     }
   }
 
-  /* -- Vision/Mission: DOM-first (heading → next sibling) to avoid nav/banner noise -- */
-  const isNavNoise = (text: string) =>
-    /\b(menu|nav|home|contact us|admission|enroll|click here|read more|get in touch|←|→)\b/i.test(text.slice(0, 60)) ||
-    text.split(/\s+/).length < 4;
-
-  if (!identity.vision) {
-    $('h1, h2, h3, h4, h5, strong, b').each((_, el) => {
-      if (/^(?:our\s+)?vision(?:\s+statement)?$/i.test($(el).text().trim())) {
-        // Try immediate following sibling paragraph/div
-        let candidate = $(el).nextAll('p, blockquote').first().text().trim().replace(/\s+/g, ' ');
-        if (!candidate) candidate = $(el).parent().next('p, blockquote, div').first().text().trim().replace(/\s+/g, ' ');
-        if (candidate.length >= 15 && candidate.length <= 500 && !isNavNoise(candidate)) {
-          identity.vision = candidate.slice(0, 250);
-          return false as any; // break each
-        }
-      }
-      return undefined;
-    });
+  /* -- Vision, Mission, and Motto extraction using vm-extractor -- */
+  const vmData = extractVisionMissionMotto($, _url, bodyText);
+  if (vmData.vision && !identity.vision) {
+    identity.vision = vmData.vision.value;
+    identity.visionConfidence = vmData.vision.confidence;
   }
-  if (!identity.vision) {
-    // Fallback regex — require colon/dash separator to reduce false positives
-    const vm = bodyText.match(/(?:our\s+)?vision\s*[:\-–]\s*([\s\S]{15,300}?)(?:\n{2,}|our\s+mission|$)/i);
-    if (vm?.[1]) {
-      const v = vm[1].trim().replace(/\s+/g, ' ');
-      if (!isNavNoise(v)) identity.vision = v.slice(0, 250);
-    }
+  if (vmData.mission && !identity.mission) {
+    identity.mission = vmData.mission.value;
+    identity.missionConfidence = vmData.mission.confidence;
   }
-
-  if (!identity.mission) {
-    $('h1, h2, h3, h4, h5, strong, b').each((_, el) => {
-      if (/^(?:our\s+)?mission(?:\s+statement)?$/i.test($(el).text().trim())) {
-        let candidate = $(el).nextAll('p, blockquote').first().text().trim().replace(/\s+/g, ' ');
-        if (!candidate) candidate = $(el).parent().next('p, blockquote, div').first().text().trim().replace(/\s+/g, ' ');
-        if (candidate.length >= 15 && candidate.length <= 500 && !isNavNoise(candidate)) {
-          identity.mission = candidate.slice(0, 250);
-          return false as any;
-        }
-      }
-      return undefined;
-    });
-  }
-  if (!identity.mission) {
-    const mm = bodyText.match(/(?:our\s+)?mission\s*[:\-–]\s*([\s\S]{15,300}?)(?:\n{2,}|our\s+vision|$)/i);
-    if (mm?.[1]) {
-      const m2 = mm[1].trim().replace(/\s+/g, ' ');
-      if (!isNavNoise(m2)) identity.mission = m2.slice(0, 250);
-    }
+  if (vmData.motto && !identity.motto) {
+    identity.motto = vmData.motto.value;
+    identity.mottoConfidence = vmData.motto.confidence;
   }
 
   return identity;
@@ -1045,20 +1016,22 @@ function refineIdentity(existing: EarlyIdentity, $: import('cheerio').CheerioAPI
     }
   }
 
-  /* -- Vision/Mission from about pages -- */
-  if (!existing.vision) {
-    const visionMatch = bodyText.match(/(?:our\s+)?vision\s*(?:[:,\-–]|statement)?\s*([\s\S]{10,300}?)(?:\.|\n|our\s+mission|$)/i);
-    if (visionMatch?.[1]) {
-      existing.vision = visionMatch[1].trim().replace(/\s+/g, ' ').slice(0, 200);
-      changed = true;
-    }
+  /* -- Vision, Mission, and Motto fallback from inner pages -- */
+  const vmData = extractVisionMissionMotto($, pageUrl, bodyText);
+  if (!existing.vision && vmData.vision) {
+    existing.vision = vmData.vision.value;
+    existing.visionConfidence = vmData.vision.confidence;
+    changed = true;
   }
-  if (!existing.mission) {
-    const missionMatch = bodyText.match(/(?:our\s+)?mission\s*(?:[:,\-–]|statement)?\s*([\s\S]{10,300}?)(?:\.|\n|our\s+vision|$)/i);
-    if (missionMatch?.[1]) {
-      existing.mission = missionMatch[1].trim().replace(/\s+/g, ' ').slice(0, 200);
-      changed = true;
-    }
+  if (!existing.mission && vmData.mission) {
+    existing.mission = vmData.mission.value;
+    existing.missionConfidence = vmData.mission.confidence;
+    changed = true;
+  }
+  if (!existing.motto && vmData.motto) {
+    existing.motto = vmData.motto.value;
+    existing.mottoConfidence = vmData.motto.confidence;
+    changed = true;
   }
 
   return changed;
