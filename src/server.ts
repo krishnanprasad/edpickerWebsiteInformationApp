@@ -110,6 +110,400 @@ function safeHostnameLabel(url: string): string {
   }
 }
 
+const INDIAN_STATES = [
+  'andhra pradesh', 'arunachal pradesh', 'assam', 'bihar', 'chhattisgarh', 'goa', 'gujarat',
+  'haryana', 'himachal pradesh', 'jharkhand', 'karnataka', 'kerala', 'madhya pradesh',
+  'maharashtra', 'manipur', 'meghalaya', 'mizoram', 'nagaland', 'odisha', 'punjab',
+  'rajasthan', 'sikkim', 'tamil nadu', 'telangana', 'tripura', 'uttar pradesh',
+  'uttarakhand', 'west bengal', 'delhi', 'chandigarh', 'puducherry', 'jammu and kashmir',
+  'ladakh',
+] as const;
+
+const BOARD_VALUES = new Set(['CBSE', 'ICSE', 'STATE', 'IB', 'IGCSE', 'NIOS', 'OTHER']);
+const SCHOOL_MUTABLE_FIELDS = new Set([
+  'name',
+  'established_year',
+  'address_line1',
+  'address_line2',
+  'city',
+  'state',
+  'pincode',
+  'phone_primary',
+  'phone_secondary',
+  'email_primary',
+  'email_secondary',
+  'principal_name',
+  'principal_email',
+  'principal_phone',
+  'board',
+  'social_facebook',
+  'social_instagram',
+  'social_youtube',
+  'social_twitter',
+  'social_linkedin',
+  'social_whatsapp',
+  'vision_text',
+  'mission_text',
+  'motto_text',
+  'summary_text',
+]);
+
+function normalizeWebsiteDomain(input: string | null | undefined): string | null {
+  if (!input) return null;
+  const raw = String(input).trim().toLowerCase();
+  if (!raw) return null;
+  try {
+    const parsed = raw.includes('://') ? new URL(raw) : new URL(`https://${raw}`);
+    const host = parsed.hostname.replace(/^www\./i, '').toLowerCase();
+    return host || null;
+  } catch {
+    return null;
+  }
+}
+
+function cleanText(value: unknown, maxLen: number): string | null {
+  if (value === null || value === undefined) return null;
+  const s = String(value).replace(/\s+/g, ' ').trim();
+  if (!s) return null;
+  return s.slice(0, maxLen);
+}
+
+function sanitizePhone(value: unknown, opts?: { allowPlus?: boolean }): string | null {
+  if (!value && value !== 0) return null;
+  let s = String(value).trim();
+  if (!s) return null;
+  if (opts?.allowPlus) {
+    s = s.replace(/[^0-9+]/g, '');
+    s = s.replace(/(?!^)\+/g, '');
+  } else {
+    s = s.replace(/\D/g, '');
+  }
+  if (s.length < 7 || s.length > 20) return null;
+  return s;
+}
+
+function extractPhones(value: unknown): string[] {
+  if (!value) return [];
+  const raw = String(value);
+  const matches = raw.match(/\+?\d[\d\s\-()]{6,}\d/g) || [];
+  const seen = new Set<string>();
+  for (const m of matches) {
+    const cleaned = sanitizePhone(m, { allowPlus: true });
+    if (!cleaned) continue;
+    seen.add(cleaned);
+  }
+  return Array.from(seen).slice(0, 2);
+}
+
+function extractEmails(value: unknown): string[] {
+  if (!value) return [];
+  const raw = String(value).toLowerCase();
+  const matches = raw.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/g) || [];
+  return Array.from(new Set(matches.map((m) => m.trim()))).slice(0, 2);
+}
+
+function confidenceLabelToScore(level: unknown): number {
+  const v = String(level || '').toLowerCase();
+  if (v === 'high') return 90;
+  if (v === 'medium') return 70;
+  if (v === 'low') return 50;
+  return 70;
+}
+
+function normalizeBoardFromKeywords(matchedKeywords: unknown): string | null {
+  if (!matchedKeywords || typeof matchedKeywords !== 'object') return null;
+  const keywords = (matchedKeywords as Record<string, unknown>).matchedKeywords;
+  const list = Array.isArray(keywords) ? keywords.map((k) => String(k).toLowerCase()) : [];
+  if (list.some((k) => k.includes('cbse'))) return 'CBSE';
+  if (list.some((k) => k.includes('icse') || k.includes('isc'))) return 'ICSE';
+  if (list.some((k) => k.includes('igcse') || k.includes('cambridge'))) return 'IGCSE';
+  if (list.some((k) => k.includes('international baccalaureate') || k.includes('ib'))) return 'IB';
+  if (list.some((k) => k.includes('nios'))) return 'NIOS';
+  if (list.some((k) => k.includes('state board'))) return 'STATE';
+  return null;
+}
+
+function parseYear(value: unknown): number | null {
+  if (!value && value !== 0) return null;
+  const m = String(value).match(/\b(18|19|20)\d{2}\b/);
+  if (!m) return null;
+  const y = Number(m[0]);
+  if (y < 1800 || y > 2100) return null;
+  return y;
+}
+
+function toTitleCase(value: string): string {
+  return value.replace(/\b[a-z]/g, (c) => c.toUpperCase());
+}
+
+function parseAddressParts(addressRaw: unknown): {
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  state: string | null;
+  pincode: string | null;
+} {
+  const address = cleanText(addressRaw, 600);
+  if (!address) {
+    return { addressLine1: null, addressLine2: null, city: null, state: null, pincode: null };
+  }
+
+  const parts = address.split(',').map((p) => p.trim()).filter(Boolean);
+  const pincode = (address.match(/\b\d{6}\b/) || [])[0] || null;
+  const lowerAddress = address.toLowerCase();
+
+  let state: string | null = null;
+  for (const candidate of INDIAN_STATES) {
+    if (lowerAddress.includes(candidate)) {
+      state = toTitleCase(candidate);
+      break;
+    }
+  }
+
+  let city: string | null = null;
+  if (parts.length >= 2) {
+    for (let i = parts.length - 1; i >= 0; i -= 1) {
+      const p = parts[i];
+      const pLower = p.toLowerCase();
+      if (pincode && p.includes(pincode)) continue;
+      if (state && pLower.includes(state.toLowerCase())) continue;
+      if (p.length >= 2 && p.length <= 100) {
+        city = p.slice(0, 100);
+        break;
+      }
+    }
+  }
+
+  const addressLine1 = cleanText(parts[0] || address, 300);
+  const addressLine2 = cleanText(parts.slice(1, 3).join(', '), 300);
+  return { addressLine1, addressLine2, city, state, pincode };
+}
+
+function normalizeSocialUrl(url: unknown, allowedHosts: string[]): string | null {
+  const raw = cleanText(url, 500);
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    const host = parsed.hostname.toLowerCase();
+    const valid = allowedHosts.some((h) => host === h || host.endsWith(`.${h}`));
+    if (!valid) return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function slugify(input: string): string {
+  return input
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-{2,}/g, '-')
+    .slice(0, 240) || 'school';
+}
+
+async function buildUniqueSlug(base: string): Promise<string> {
+  const baseSlug = slugify(base);
+  let attempt = baseSlug;
+  let counter = 2;
+  while (counter < 1000) {
+    const existing = await pgPool.query('SELECT id FROM schools WHERE slug = $1 LIMIT 1', [attempt]);
+    if (!existing.rowCount) return attempt;
+    attempt = `${baseSlug}-${counter}`;
+    counter += 1;
+  }
+  return `${baseSlug}-${Date.now()}`;
+}
+
+function normalizeSchoolField(field: string, value: unknown): string | number | null {
+  if (value === null || value === undefined) return null;
+  if (field === 'established_year') return parseYear(value);
+  if (field === 'phone_primary' || field === 'phone_secondary' || field === 'principal_phone') return sanitizePhone(value, { allowPlus: true });
+  if (field === 'social_whatsapp') return sanitizePhone(value, { allowPlus: false });
+  if (field === 'email_primary' || field === 'email_secondary' || field === 'principal_email') return cleanText(value, 200)?.toLowerCase() || null;
+  if (field === 'board') {
+    const board = cleanText(value, 50)?.toUpperCase() || null;
+    if (!board || !BOARD_VALUES.has(board)) return null;
+    return board;
+  }
+  if (field === 'name' || field === 'principal_name') return cleanText(value, 200);
+  if (field === 'address_line1' || field === 'address_line2') return cleanText(value, 300);
+  if (field === 'city' || field === 'state' || field === 'medium_of_instruction') return cleanText(value, 100);
+  if (field === 'pincode') return (cleanText(value, 10) || '').match(/^\d{6}$/)?.[0] || null;
+  if (field.startsWith('social_')) return cleanText(value, 500);
+  if (field === 'motto_text') return cleanText(value, 200);
+  if (field === 'vision_text' || field === 'mission_text') return cleanText(value, 600);
+  if (field === 'summary_text') return cleanText(value, 1200);
+  return cleanText(value, 500);
+}
+
+async function applySchoolFieldMerge(params: {
+  schoolId: string;
+  field: string;
+  value: unknown;
+  confidence: number;
+  sourceUrl: string | null;
+  sourceType: string;
+  sessionId: string;
+}) {
+  const { schoolId, field, value, confidence, sourceUrl, sourceType, sessionId } = params;
+  if (!SCHOOL_MUTABLE_FIELDS.has(field)) return;
+  const normalizedValue = normalizeSchoolField(field, value);
+  if (normalizedValue === null || normalizedValue === '') return;
+
+  const metaRes = await pgPool.query(
+    `SELECT confidence, is_manually_verified
+     FROM school_field_meta
+     WHERE school_id = $1 AND field_name = $2`,
+    [schoolId, field],
+  );
+
+  if (metaRes.rowCount) {
+    const row = metaRes.rows[0];
+    if (Boolean(row.is_manually_verified)) return;
+    const existingConfidence = row.confidence === null ? 0 : Number(row.confidence);
+    if (existingConfidence > confidence) return;
+  }
+
+  await pgPool.query(`UPDATE schools SET ${field} = $2, updated_at = NOW() WHERE id = $1`, [schoolId, normalizedValue]);
+  await pgPool.query(
+    `INSERT INTO school_field_meta
+      (school_id, field_name, confidence, source_url, source_type, last_session_id, is_manually_verified)
+     VALUES ($1, $2, $3, $4, $5, $6, FALSE)
+     ON CONFLICT (school_id, field_name) DO UPDATE SET
+       confidence = EXCLUDED.confidence,
+       source_url = EXCLUDED.source_url,
+       source_type = EXCLUDED.source_type,
+       last_session_id = EXCLUDED.last_session_id,
+       updated_at = NOW()`,
+    [schoolId, field, Math.max(0, Math.min(100, Math.round(confidence))), sourceUrl, sourceType, sessionId],
+  );
+}
+
+function derivePersistentCrawlStatus(scanConfidence: number | null | undefined, scanConfidenceLabel: string | null | undefined, factsCount: number, pagesScanned: number): 'analysed' | 'partial' {
+  const lowByLabel = String(scanConfidenceLabel || '').toLowerCase().includes('low');
+  if (lowByLabel || (scanConfidence ?? 0) < 50 || factsCount === 0 || pagesScanned <= 1) return 'partial';
+  return 'analysed';
+}
+
+async function upsertSchoolFromSession(params: {
+  sessionId: string;
+  crawlStatus: 'analysed' | 'partial' | 'failed';
+  crawlFailReason?: string | null;
+  summaryText?: string | null;
+}) {
+  const { sessionId, crawlStatus, crawlFailReason, summaryText } = params;
+  const sessionRes = await pgPool.query(
+    `SELECT s.url, s.early_identity, s.summary, ec.matched_keywords
+     FROM analysis_sessions s
+     LEFT JOIN education_classification ec ON ec.session_id = s.id
+     WHERE s.id = $1`,
+    [sessionId],
+  );
+  if (!sessionRes.rowCount) return;
+
+  const row = sessionRes.rows[0];
+  const sourceUrl = cleanText(row.url, 500);
+  const websiteUrl = normalizeWebsiteDomain(sourceUrl);
+  if (!websiteUrl) return;
+
+  const identity = (row.early_identity && typeof row.early_identity === 'object')
+    ? (row.early_identity as Record<string, unknown>)
+    : {};
+  const parsedAddress = parseAddressParts(identity.address);
+  const extractedName = cleanText(identity.schoolName, 200) || safeHostnameLabel(sourceUrl || websiteUrl);
+  const baseSlug = `${extractedName}${parsedAddress.city ? ` ${parsedAddress.city}` : ''}`;
+
+  let schoolRes = await pgPool.query(`SELECT id FROM schools WHERE website_url = $1 LIMIT 1`, [websiteUrl]);
+  let schoolId: string;
+  if (!schoolRes.rowCount) {
+    const slug = await buildUniqueSlug(baseSlug);
+    const inserted = await pgPool.query(
+      `INSERT INTO schools (name, slug, website_url, raw_input_url, crawl_status, data_source, last_crawled_at, crawl_fail_reason)
+       VALUES ($1, $2, $3, $4, $5, 'crawl', CASE WHEN $5 IN ('analysed','partial') THEN NOW() ELSE NULL END, $6)
+       RETURNING id`,
+      [extractedName, slug, websiteUrl, sourceUrl, crawlStatus, crawlFailReason || null],
+    );
+    schoolId = String(inserted.rows[0].id);
+  } else {
+    schoolId = String(schoolRes.rows[0].id);
+    await pgPool.query(
+      `UPDATE schools
+       SET crawl_status = $2,
+           last_crawled_at = CASE WHEN $2 IN ('analysed','partial') THEN NOW() ELSE last_crawled_at END,
+           crawl_fail_reason = $3,
+           raw_input_url = COALESCE(raw_input_url, $4),
+           updated_at = NOW()
+       WHERE id = $1`,
+      [schoolId, crawlStatus, crawlFailReason || null, sourceUrl],
+    );
+  }
+
+  const phones = extractPhones(identity.phone);
+  const emails = extractEmails(identity.email);
+  const social = (identity.socialUrls && typeof identity.socialUrls === 'object')
+    ? (identity.socialUrls as Record<string, unknown>)
+    : {};
+  const board = normalizeBoardFromKeywords(row.matched_keywords);
+  const confidenceBase = 75;
+
+  await applySchoolFieldMerge({ schoolId, field: 'name', value: extractedName, confidence: 90, sourceUrl, sourceType: 'html', sessionId });
+  await applySchoolFieldMerge({ schoolId, field: 'established_year', value: identity.foundingYear, confidence: confidenceBase, sourceUrl, sourceType: 'html', sessionId });
+  await applySchoolFieldMerge({ schoolId, field: 'address_line1', value: parsedAddress.addressLine1, confidence: confidenceBase, sourceUrl, sourceType: 'html', sessionId });
+  await applySchoolFieldMerge({ schoolId, field: 'address_line2', value: parsedAddress.addressLine2, confidence: confidenceBase, sourceUrl, sourceType: 'html', sessionId });
+  await applySchoolFieldMerge({ schoolId, field: 'city', value: parsedAddress.city, confidence: 65, sourceUrl, sourceType: 'html', sessionId });
+  await applySchoolFieldMerge({ schoolId, field: 'state', value: parsedAddress.state, confidence: 65, sourceUrl, sourceType: 'html', sessionId });
+  await applySchoolFieldMerge({ schoolId, field: 'pincode', value: parsedAddress.pincode, confidence: 70, sourceUrl, sourceType: 'html', sessionId });
+  await applySchoolFieldMerge({ schoolId, field: 'phone_primary', value: phones[0] || null, confidence: 85, sourceUrl, sourceType: 'html', sessionId });
+  await applySchoolFieldMerge({ schoolId, field: 'phone_secondary', value: phones[1] || null, confidence: 80, sourceUrl, sourceType: 'html', sessionId });
+  await applySchoolFieldMerge({ schoolId, field: 'email_primary', value: emails[0] || null, confidence: 85, sourceUrl, sourceType: 'html', sessionId });
+  await applySchoolFieldMerge({ schoolId, field: 'email_secondary', value: emails[1] || null, confidence: 80, sourceUrl, sourceType: 'html', sessionId });
+  await applySchoolFieldMerge({ schoolId, field: 'principal_name', value: identity.principalName, confidence: 75, sourceUrl, sourceType: 'html', sessionId });
+  await applySchoolFieldMerge({ schoolId, field: 'vision_text', value: identity.vision, confidence: confidenceLabelToScore(identity.visionConfidence), sourceUrl, sourceType: 'html', sessionId });
+  await applySchoolFieldMerge({ schoolId, field: 'mission_text', value: identity.mission, confidence: confidenceLabelToScore(identity.missionConfidence), sourceUrl, sourceType: 'html', sessionId });
+  await applySchoolFieldMerge({ schoolId, field: 'motto_text', value: identity.motto, confidence: confidenceLabelToScore(identity.mottoConfidence), sourceUrl, sourceType: 'html', sessionId });
+  await applySchoolFieldMerge({
+    schoolId, field: 'social_facebook',
+    value: normalizeSocialUrl(social.facebook, ['facebook.com', 'fb.com']),
+    confidence: 80, sourceUrl, sourceType: 'html', sessionId,
+  });
+  await applySchoolFieldMerge({
+    schoolId, field: 'social_instagram',
+    value: normalizeSocialUrl(social.instagram, ['instagram.com']),
+    confidence: 80, sourceUrl, sourceType: 'html', sessionId,
+  });
+  await applySchoolFieldMerge({
+    schoolId, field: 'social_youtube',
+    value: normalizeSocialUrl(social.youtube, ['youtube.com', 'youtu.be']),
+    confidence: 80, sourceUrl, sourceType: 'html', sessionId,
+  });
+  await applySchoolFieldMerge({
+    schoolId, field: 'social_twitter',
+    value: normalizeSocialUrl(social.twitter, ['twitter.com', 'x.com']),
+    confidence: 80, sourceUrl, sourceType: 'html', sessionId,
+  });
+  await applySchoolFieldMerge({
+    schoolId, field: 'social_linkedin',
+    value: normalizeSocialUrl(social.linkedin, ['linkedin.com']),
+    confidence: 80, sourceUrl, sourceType: 'html', sessionId,
+  });
+  await applySchoolFieldMerge({
+    schoolId, field: 'social_whatsapp',
+    value: sanitizePhone(identity.phone, { allowPlus: false }),
+    confidence: 60, sourceUrl, sourceType: 'html', sessionId,
+  });
+  await applySchoolFieldMerge({ schoolId, field: 'board', value: board, confidence: 70, sourceUrl, sourceType: 'classification', sessionId });
+  await applySchoolFieldMerge({
+    schoolId,
+    field: 'summary_text',
+    value: cleanText(summaryText || row.summary, 1200),
+    confidence: 85,
+    sourceUrl,
+    sourceType: 'ai_summary',
+    sessionId,
+  });
+}
+
 async function refreshSession(sessionId: string): Promise<{ ok: true; sessionId: string; status: string } | { ok: false; code: string; message: string }> {
   const sess = await pgPool.query(
     'SELECT id, url, url_hash, status FROM analysis_sessions WHERE id = $1',
@@ -1148,6 +1542,12 @@ app.post('/internal/crawl-result', async (req, res) => {
     ],
   );
 
+  const persistentStatus = derivePersistentCrawlStatus(scanConfidence, scanConfidenceLabel, facts?.length || 0, pagesScanned);
+  await upsertSchoolFromSession({
+    sessionId,
+    crawlStatus: persistentStatus,
+  });
+
   // Enqueue scoring
   await scoringQueue.add('score-job', { sessionId, url: pageUrl, extractedText });
 
@@ -1240,8 +1640,39 @@ app.post('/internal/score-complete', async (req, res) => {
     ],
   );
 
+  await upsertSchoolFromSession({
+    sessionId,
+    crawlStatus: 'analysed',
+    summaryText: summary,
+  });
+
   // Cache
   await redis.set(`analysis:v1:${urlHash}`, sessionId, 'EX', 86400);
+  res.json({ ok: true });
+});
+
+/* ================================================================== */
+/*  POST /internal/crawl-failed -- optional callback for failed crawl  */
+/* ================================================================== */
+
+app.post('/internal/crawl-failed', async (req, res) => {
+  if (!requireInternalKey(req, res)) return;
+  const { sessionId, reason } = req.body as { sessionId: string; reason?: string };
+  if (!sessionId) return res.status(400).json({ error: 'Missing sessionId' });
+
+  await pgPool.query(
+    `UPDATE analysis_sessions
+     SET status = 'Failed', completed_at = NOW()
+     WHERE id = $1`,
+    [sessionId],
+  );
+
+  await upsertSchoolFromSession({
+    sessionId,
+    crawlStatus: 'failed',
+    crawlFailReason: cleanText(reason, 500) || 'Crawler failed',
+  });
+
   res.json({ ok: true });
 });
 

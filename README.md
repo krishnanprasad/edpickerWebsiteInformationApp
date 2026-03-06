@@ -60,6 +60,7 @@ psql $DATABASE_URL -f sql/migrations/001_scoring_v2.sql
 psql $DATABASE_URL -f sql/migrations/002_early_identity.sql
 psql $DATABASE_URL -f sql/migrations/003_crawler_v2.sql
 psql $DATABASE_URL -f sql/migrations/004_compare_lists.sql
+psql $DATABASE_URL -f sql/migrations/005_schools_registry.sql
 ```
 New databases auto-apply schema + migrations via Docker init scripts.
 
@@ -137,5 +138,9 @@ OPENAI_API_KEY=sk-...
 
 Migrations live in `sql/migrations/` and are numbered sequentially:
 - `001_scoring_v2.sql` — Adds classification, safety scores, clarity scores, B2B leads tables, and crawl stat columns
+- `002_early_identity.sql` - Adds homepage identity extraction fields
+- `003_crawler_v2.sql` - Adds crawler queue/facts/stat tracking tables
+- `004_compare_lists.sql` - Adds compare list tables
+- `005_schools_registry.sql` - Adds permanent schools table and per-field merge metadata
 
 Apply with: `psql $DATABASE_URL -f sql/migrations/001_scoring_v2.sql`
