@@ -10,6 +10,7 @@ School website transparency scanner — crawl, classify, and score educational i
 3. **Parent Clarity Index** — 0-100 "Decision Clarity Level" measuring 5 factors: Admission Dates, Fee Structure, Academic Calendar, Contact & Map, Results/Outcomes.
 4. **Crawl Transparency** — Shows pages/PDFs/images scanned, crawl depth, scan time, and confidence level.
 5. **B2B CTA Hook** — "School can verify & improve this score" call-to-action tracking.
+6. **Mandatory Document Audit (CBSE)** — Detects mandatory disclosure PDFs, marks missing documents, extracts expiry dates, and flags `needs_review` when data is unclear/conflicting.
 
 ### Architecture
 - **3-stage pipeline**: Classify → Crawl → Score (BullMQ queues)
@@ -61,6 +62,7 @@ psql $DATABASE_URL -f sql/migrations/002_early_identity.sql
 psql $DATABASE_URL -f sql/migrations/003_crawler_v2.sql
 psql $DATABASE_URL -f sql/migrations/004_compare_lists.sql
 psql $DATABASE_URL -f sql/migrations/005_schools_registry.sql
+psql $DATABASE_URL -f sql/migrations/006_mandatory_documents.sql
 ```
 New databases auto-apply schema + migrations via Docker init scripts.
 
@@ -142,5 +144,6 @@ Migrations live in `sql/migrations/` and are numbered sequentially:
 - `003_crawler_v2.sql` - Adds crawler queue/facts/stat tracking tables
 - `004_compare_lists.sql` - Adds compare list tables
 - `005_schools_registry.sql` - Adds permanent schools table and per-field merge metadata
+- `006_mandatory_documents.sql` - Adds mandatory document audit table with expiry/details/review status per school
 
 Apply with: `psql $DATABASE_URL -f sql/migrations/001_scoring_v2.sql`

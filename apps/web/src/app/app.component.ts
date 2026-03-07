@@ -12,6 +12,7 @@ import { RedFlagsComponent } from './components/red-flags.component';
 import { ScanInputComponent } from './components/scan-input.component';
 import { ScanProgressComponent } from './components/scan-progress.component';
 import { SchoolIdentityComponent } from './components/school-identity.component';
+import { SchoolAdminComponent } from './components/school-admin.component';
 
 import { CompareService } from './services/compare.service';
 import { CrashHandlerService } from './services/crash-handler.service';
@@ -34,9 +35,11 @@ import { SchoolIdentity, ScanResponse, ScanStatus, SSEEvent, RedFlagsResponse, R
     ClarityScoreComponent,
     CrawlSummaryComponent,
     AskBoxComponent,
+    SchoolAdminComponent,
   ],
   template: `
-    <div class="shell">
+    <app-school-admin *ngIf="isSchoolAdminRoute"></app-school-admin>
+    <div class="shell" *ngIf="!isSchoolAdminRoute">
       <!-- Header Nav: Home + Compare + Add School -->
       <header class="topbar">
         <div class="topbar-inner">
@@ -47,6 +50,7 @@ import { SchoolIdentity, ScanResponse, ScanStatus, SSEEvent, RedFlagsResponse, R
             <button class="nav-btn" [class.active]="activeView === 'compare'" (click)="goCompare()">
               Compare ({{ filledCount }}/3)
             </button>
+            <a class="nav-btn" href="/schooladmin">School Admin</a>
             <button class="primary-btn" (click)="startAddToCompare()" [disabled]="!hasFreeSlot">
               Add school to compare
             </button>
@@ -952,6 +956,8 @@ export class AppComponent implements OnInit, OnDestroy {
   @ViewChild('homeAskBox') homeAskBox?: AskBoxComponent;
 
   activeView: 'home' | 'compare' = 'home';
+  readonly isSchoolAdminRoute = typeof window !== 'undefined'
+    && window.location.pathname.toLowerCase().startsWith('/schooladmin');
 
   compareListId = '';
 

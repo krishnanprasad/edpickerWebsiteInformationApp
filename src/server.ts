@@ -56,17 +56,37 @@ app.use(express.static('public'));
 /*  Validation & helpers                                               */
 /* ------------------------------------------------------------------ */
 
-const scanSchema = z.object({ url: z.string().url() });
+const inputUrlSchema = z.string()
+  .min(1)
+  .transform((raw) => coerceHttpUrl(raw))
+  .refine((value) => isValidHttpUrl(value), { message: 'Invalid URL' });
+
+const scanSchema = z.object({ url: inputUrlSchema });
 const questionSchema = z.object({ question: z.string().min(3) });
 const compareListIdSchema = z.object({ compareListId: z.string().uuid() });
 const compareListAddSchema = z.object({
-  url: z.string().url(),
+  url: inputUrlSchema,
   staleAction: z.enum(['add_anyway', 'refresh']).optional(),
 });
 const refreshSchema = z.object({});
 
+function coerceHttpUrl(input: string): string {
+  const trimmed = String(input || '').trim();
+  if (!trimmed) return '';
+  return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+}
+
+function isValidHttpUrl(input: string): boolean {
+  try {
+    const parsed = new URL(input);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 function normalizeUrl(url: string): string {
-  const parsed = new URL(url);
+  const parsed = new URL(coerceHttpUrl(url));
   parsed.hash = '';
   parsed.search = '';
   parsed.pathname = parsed.pathname.replace(/\/$/, '');
@@ -146,6 +166,37 @@ const SCHOOL_MUTABLE_FIELDS = new Set([
   'motto_text',
   'summary_text',
 ]);
+
+type MandatoryDocumentStatus = 'present' | 'missing' | 'needs_review';
+
+interface CrawlMandatoryDocument {
+  code: string;
+  name: string;
+  status: MandatoryDocumentStatus;
+  sourceUrl?: string | null;
+  expiryDate?: string | null;
+  details?: Record<string, unknown>;
+  reviewMessage?: string | null;
+  confidence?: number;
+}
+
+function normalizeMandatoryDocumentStatus(value: unknown): MandatoryDocumentStatus {
+  const v = String(value || '').toLowerCase();
+  if (v === 'present' || v === 'missing' || v === 'needs_review') return v;
+  return 'needs_review';
+}
+
+function normalizeDateInput(value: unknown): string | null {
+  if (!value) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const dt = new Date(`${raw}T00:00:00Z`);
+  if (Number.isNaN(dt.getTime())) return null;
+  if (dt.toISOString().slice(0, 10) !== raw) return null;
+  return raw;
+}
 
 function normalizeWebsiteDomain(input: string | null | undefined): string | null {
   if (!input) return null;
@@ -379,6 +430,45 @@ async function applySchoolFieldMerge(params: {
   );
 }
 
+async function upsertSchoolMandatoryDocuments(params: {
+  schoolId: string;
+  sessionId: string;
+  documents: CrawlMandatoryDocument[];
+}) {
+  const { schoolId, sessionId, documents } = params;
+  for (const doc of documents) {
+    const codeRaw = cleanText(doc.code, 80)?.toLowerCase() || null;
+    const code = codeRaw ? codeRaw.replace(/[^a-z0-9_]+/g, '_').replace(/_{2,}/g, '_').replace(/^_|_$/g, '') : null;
+    const name = cleanText(doc.name, 200);
+    if (!code || !name) continue;
+
+    const status = normalizeMandatoryDocumentStatus(doc.status);
+    const sourceUrl = cleanText(doc.sourceUrl, 500);
+    const expiryDate = normalizeDateInput(doc.expiryDate);
+    const details = doc.details && typeof doc.details === 'object' ? doc.details : {};
+    const reviewMessage = cleanText(doc.reviewMessage, 500);
+    const confidence = Math.max(0, Math.min(100, Math.round(Number(doc.confidence ?? 0))));
+
+    await pgPool.query(
+      `INSERT INTO school_mandatory_documents
+        (school_id, session_id, document_code, document_name, status, source_url, expiry_date, extracted_details, review_message, confidence, checked_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8::jsonb, $9, $10, NOW())
+       ON CONFLICT (school_id, document_code) DO UPDATE SET
+         session_id = EXCLUDED.session_id,
+         document_name = EXCLUDED.document_name,
+         status = EXCLUDED.status,
+         source_url = EXCLUDED.source_url,
+         expiry_date = EXCLUDED.expiry_date,
+         extracted_details = EXCLUDED.extracted_details,
+         review_message = EXCLUDED.review_message,
+         confidence = EXCLUDED.confidence,
+         checked_at = NOW(),
+         updated_at = NOW()`,
+      [schoolId, sessionId, code, name, status, sourceUrl, expiryDate, JSON.stringify(details), reviewMessage, confidence],
+    );
+  }
+}
+
 function derivePersistentCrawlStatus(scanConfidence: number | null | undefined, scanConfidenceLabel: string | null | undefined, factsCount: number, pagesScanned: number): 'analysed' | 'partial' {
   const lowByLabel = String(scanConfidenceLabel || '').toLowerCase().includes('low');
   if (lowByLabel || (scanConfidence ?? 0) < 50 || factsCount === 0 || pagesScanned <= 1) return 'partial';
@@ -390,7 +480,7 @@ async function upsertSchoolFromSession(params: {
   crawlStatus: 'analysed' | 'partial' | 'failed';
   crawlFailReason?: string | null;
   summaryText?: string | null;
-}) {
+}): Promise<string | null> {
   const { sessionId, crawlStatus, crawlFailReason, summaryText } = params;
   const sessionRes = await pgPool.query(
     `SELECT s.url, s.early_identity, s.summary, ec.matched_keywords
@@ -399,12 +489,12 @@ async function upsertSchoolFromSession(params: {
      WHERE s.id = $1`,
     [sessionId],
   );
-  if (!sessionRes.rowCount) return;
+  if (!sessionRes.rowCount) return null;
 
   const row = sessionRes.rows[0];
   const sourceUrl = cleanText(row.url, 500);
   const websiteUrl = normalizeWebsiteDomain(sourceUrl);
-  if (!websiteUrl) return;
+  if (!websiteUrl) return null;
 
   const identity = (row.early_identity && typeof row.early_identity === 'object')
     ? (row.early_identity as Record<string, unknown>)
@@ -501,6 +591,8 @@ async function upsertSchoolFromSession(params: {
     sourceType: 'ai_summary',
     sessionId,
   });
+
+  return schoolId;
 }
 
 async function refreshSession(sessionId: string): Promise<{ ok: true; sessionId: string; status: string } | { ok: false; code: string; message: string }> {
@@ -526,6 +618,7 @@ async function refreshSession(sessionId: string): Promise<{ ok: true; sessionId:
     await pgPool.query('DELETE FROM education_classification WHERE session_id = $1', [sessionId]);
     await pgPool.query('DELETE FROM safety_scores WHERE session_id = $1', [sessionId]);
     await pgPool.query('DELETE FROM clarity_scores WHERE session_id = $1', [sessionId]);
+    await pgPool.query('DELETE FROM school_mandatory_documents WHERE session_id = $1', [sessionId]).catch(() => {});
 
     await pgPool.query(
       `UPDATE analysis_sessions
@@ -1309,6 +1402,34 @@ app.get('/api/scan/:id', async (req, res) => {
     response.earlyIdentity = session.early_identity;
   }
 
+  try {
+    const docResult = await pgPool.query(
+      `SELECT document_code, document_name, status, source_url, expiry_date, extracted_details, review_message, confidence
+       FROM school_mandatory_documents
+       WHERE session_id = $1
+       ORDER BY document_name ASC`,
+      [sessionId],
+    );
+    if (docResult.rowCount) {
+      response.mandatoryDocuments = docResult.rows.map((d) => ({
+        code: d.document_code,
+        name: d.document_name,
+        status: d.status,
+        sourceUrl: d.source_url,
+        expiryDate: d.expiry_date,
+        details: d.extracted_details || {},
+        reviewMessage: d.review_message,
+        confidence: d.confidence,
+      }));
+      const needsReviewCount = docResult.rows.filter((d) => String(d.status) === 'needs_review').length;
+      if (needsReviewCount > 0) {
+        response.documentReviewMessage = `${needsReviewCount} mandatory document(s) need manual review.`;
+      }
+    }
+  } catch {
+    // Migration not applied yet or table unavailable.
+  }
+
   // Safety + Clarity scores (available when Ready)
   if (status === 'Ready') {
     response.overallScore = session.overall_score;
@@ -1472,7 +1593,7 @@ app.post('/internal/crawl-result', async (req, res) => {
     pagesScanned, pdfsScanned, imagesScanned,
     maxDepthReached, structuredDataDetected,
     scanDurationMs, scanConfidence, scanConfidenceLabel,
-    facts, preliminaryScore, playwrightBudgetUsed,
+    facts, mandatoryDocuments, preliminaryScore, playwrightBudgetUsed,
   } = req.body as {
     sessionId: string;
     pageUrl: string;
@@ -1488,6 +1609,7 @@ app.post('/internal/crawl-result', async (req, res) => {
     scanConfidence: number;
     scanConfidenceLabel: string;
     facts?: { key: string; value: string; confidence: number; sourceUrl: string; sourceType: string; evidence?: string }[];
+    mandatoryDocuments?: CrawlMandatoryDocument[];
     preliminaryScore?: { safety: number; clarity: number; overall: number };
     playwrightBudgetUsed?: number;
   };
@@ -1545,10 +1667,17 @@ app.post('/internal/crawl-result', async (req, res) => {
 
   const persistentStatus = derivePersistentCrawlStatus(scanConfidence, scanConfidenceLabel, facts?.length || 0, pagesScanned);
   try {
-    await upsertSchoolFromSession({
+    const schoolId = await upsertSchoolFromSession({
       sessionId,
       crawlStatus: persistentStatus,
     });
+    if (schoolId && Array.isArray(mandatoryDocuments) && mandatoryDocuments.length > 0) {
+      await upsertSchoolMandatoryDocuments({
+        schoolId,
+        sessionId,
+        documents: mandatoryDocuments,
+      });
+    }
   } catch (error) {
     // Keep crawl pipeline running even if persistent school upsert fails.
     console.error('[schools-upsert:crawl-result] failed', { sessionId, error });

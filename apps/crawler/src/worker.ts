@@ -28,9 +28,18 @@ import { getPatternConfig, initPatternConfig, isPatternConfigLoaded } from './pa
 
 import {
   fetchWithCheerio, fetchWithPlaywright, closePlaywrightBrowser,
-  fetchSitemapUrls, headCheck,
+  fetchSitemapUrls, headCheck, fetchPdfBuffer,
   type CheerioFetchResult,
 } from './http-client.js';
+import { extractPdfText } from './pdf-extractor.js';
+import {
+  analyzeMandatoryPdf,
+  buildMissingMandatoryDocuments,
+  inferMandatoryDocFromUrl,
+  inferMandatoryDocFromSignal,
+  mergeMandatoryDocumentAudit,
+  type MandatoryDocumentAudit,
+} from './mandatory-docs.js';
 
 import { emitEvent, emitTerminalEvent, closeSseClient } from './sse.js';
 
@@ -88,8 +97,10 @@ const scoringQueueName = process.env.SCORING_QUEUE_NAME || 'schoollens-score';
 
 const PLAYWRIGHT_HARD_BUDGET = Number(process.env.PLAYWRIGHT_BUDGET ?? 5);
 const CHEERIO_MIN_TEXT_LENGTH = 500;
+const PDF_MAX_BYTES = Number(process.env.PDF_MAX_BYTES ?? (8 * 1024 * 1024));
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const WORKER_PORT = Number(process.env.PORT || 8080);
+const DISCLOSURE_SIGNAL_RX = /\b(mandatory\s*public\s*disclosure|mandatory\s*disclosure|public\s*disclosure|cbse\s*disclosure|appendix\s*ix)\b/i;
 
 http.createServer((_req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -1155,6 +1166,10 @@ function computePreliminaryScore(facts: CrawlFact[]): PreliminaryScore {
   return { safety: safetyTotal, clarity: clarityTotal, overall: Math.round((safetyTotal + clarityTotal) / 2) };
 }
 
+function isDisclosureSignal(value: string): boolean {
+  return DISCLOSURE_SIGNAL_RX.test(value || '');
+}
+
 /* ------------------------------------------------------------------ */
 /*  Main crawl V2 function                                             */
 /* ------------------------------------------------------------------ */
@@ -1165,6 +1180,8 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
   const seen = new SeenUrls();
   const allFacts: CrawlFact[] = [];
   const pageEntries: PageEntry[] = [];
+  const mandatoryDocs = new Map<string, MandatoryDocumentAudit>();
+  let homepageDisclosureLinkFound = false;
   let playwrightBudget = PLAYWRIGHT_HARD_BUDGET;
   let pdfsFound = 0;
   let imagesFound = 0;
@@ -1223,6 +1240,12 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
     const homepageFacts = extractFacts(homepageText, url, 'homepage');
     allFacts.push(...homepageFacts);
     imagesFound += homepageResult.$('img').length;
+    homepageDisclosureLinkFound = homepageResult.$('a[href]').toArray().some((el) => {
+      const anchor = homepageResult.$(el);
+      const href = (anchor.attr('href') || '').trim();
+      const text = anchor.text().trim();
+      return isDisclosureSignal(`${text} ${href}`);
+    });
 
     await emitEvent(sessionId, 'page_crawled', {
       url, method: 'cheerio', tier: -1, factsFound: homepageFacts.length,
@@ -1285,14 +1308,68 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
         // PDF handling
         if (pageUrl.toLowerCase().endsWith('.pdf')) {
           pdfsFound++;
+          const urlFallback = inferMandatoryDocFromUrl(pageUrl);
           try {
-            const head = await headCheck(pageUrl);
-            if (head.contentLength > 2 * 1024 * 1024) {
-              console.log(`[${sessionId.slice(0, 8)}] Skipping large PDF (${Math.round(head.contentLength / 1024)}KB): ${pageUrl}`);
+            try {
+              const head = await headCheck(pageUrl);
+              if (head.contentLength > PDF_MAX_BYTES) {
+                console.log(`[${sessionId.slice(0, 8)}] Skipping large PDF (${Math.round(head.contentLength / 1024)}KB): ${pageUrl}`);
+                if (urlFallback) {
+                  const candidate: MandatoryDocumentAudit = {
+                    ...urlFallback,
+                    reviewMessage: `PDF size is too large to parse automatically (${Math.round(head.contentLength / 1024)}KB). Manual review needed.`,
+                  };
+                  mandatoryDocs.set(candidate.code, mergeMandatoryDocumentAudit(mandatoryDocs.get(candidate.code), candidate));
+                }
+                await emitEvent(sessionId, 'page_crawled', { url: pageUrl, method: 'pdf_skip_large', tier, factsFound: 0 });
+                continue;
+              }
+            } catch { /* proceed to download */ }
+
+            const pdf = await fetchPdfBuffer(pageUrl, 20_000, PDF_MAX_BYTES);
+            const pdfText = await extractPdfText(pdf.buffer);
+            if (pdfText.length < 50) {
+              if (urlFallback) {
+                const candidate: MandatoryDocumentAudit = {
+                  ...urlFallback,
+                  reviewMessage: 'PDF downloaded, but text extraction was too weak. Manual review needed.',
+                };
+                mandatoryDocs.set(candidate.code, mergeMandatoryDocumentAudit(mandatoryDocs.get(candidate.code), candidate));
+              }
+              await emitEvent(sessionId, 'page_crawled', { url: pageUrl, method: 'pdf_needs_review', tier, factsFound: 0 });
               continue;
             }
-          } catch { /* proceed anyway */ }
-          await emitEvent(sessionId, 'page_crawled', { url: pageUrl, method: 'pdf_skip', tier, factsFound: 0 });
+
+            pageEntries.push({
+              url: pageUrl,
+              title: pageUrl,
+              text: pdfText,
+            });
+
+            const sourceType = tier === 0 ? 'mandatory_pdf' : 'inner_pdf';
+            const pageFacts = extractFacts(pdfText, pageUrl, sourceType);
+            allFacts.push(...pageFacts);
+
+            const auditedDoc = analyzeMandatoryPdf(pageUrl, pdfText);
+            if (auditedDoc) {
+              mandatoryDocs.set(auditedDoc.code, mergeMandatoryDocumentAudit(mandatoryDocs.get(auditedDoc.code), auditedDoc));
+            } else if (urlFallback) {
+              mandatoryDocs.set(urlFallback.code, mergeMandatoryDocumentAudit(mandatoryDocs.get(urlFallback.code), urlFallback));
+            }
+
+            await emitEvent(sessionId, 'page_crawled', {
+              url: pageUrl, method: 'pdf', tier, factsFound: pageFacts.length,
+            });
+          } catch (pdfErr) {
+            if (urlFallback) {
+              const candidate: MandatoryDocumentAudit = {
+                ...urlFallback,
+                reviewMessage: `PDF parsing failed: ${pdfErr instanceof Error ? pdfErr.message : 'Unknown error'}. Manual review needed.`,
+              };
+              mandatoryDocs.set(candidate.code, mergeMandatoryDocumentAudit(mandatoryDocs.get(candidate.code), candidate));
+            }
+            await emitEvent(sessionId, 'page_crawled', { url: pageUrl, method: 'pdf_error', tier, factsFound: 0 });
+          }
           continue;
         }
 
@@ -1310,6 +1387,47 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
           pageTitle = result.$('title').text().trim() || pageUrl;
           pageText = extractCleanText(result.$);
           imagesFound += result.$('img').length;
+
+          if (isDisclosureSignal(`${pageUrl} ${pageTitle}`)) {
+            const anchors = result.$('a[href]').toArray().slice(0, 80);
+            let checkedLinks = 0;
+            for (const anchorEl of anchors) {
+              if (checkedLinks >= 20) break;
+              const anchor = result.$(anchorEl);
+              const href = (anchor.attr('href') || '').trim();
+              const text = anchor.text().trim();
+              if (!href) continue;
+              if (!isDisclosureSignal(`${text} ${href}`) && !href.toLowerCase().includes('.pdf')) continue;
+
+              try {
+                const linked = canonicalizeUrl(new URL(href, pageUrl).toString());
+                if (new URL(linked).hostname.toLowerCase() !== originHost) continue;
+                const inferred = inferMandatoryDocFromSignal(text, linked);
+                if (!inferred) continue;
+                checkedLinks++;
+                try {
+                  const head = await headCheck(linked);
+                  if (head.statusCode >= 400) {
+                    const candidate: MandatoryDocumentAudit = {
+                      ...inferred,
+                      sourceUrl: linked,
+                      status: 'needs_review',
+                      reviewMessage: `Listed under disclosure, but link is not reachable (HTTP ${head.statusCode}).`,
+                    };
+                    mandatoryDocs.set(candidate.code, mergeMandatoryDocumentAudit(mandatoryDocs.get(candidate.code), candidate));
+                  }
+                } catch {
+                  const candidate: MandatoryDocumentAudit = {
+                    ...inferred,
+                    sourceUrl: linked,
+                    status: 'needs_review',
+                    reviewMessage: 'Listed under disclosure, but link is not reachable.',
+                  };
+                  mandatoryDocs.set(candidate.code, mergeMandatoryDocumentAudit(mandatoryDocs.get(candidate.code), candidate));
+                }
+              } catch { /* ignore malformed link */ }
+            }
+          }
 
           // Playwright fallback for thin content OR garbage content
           if ((pageText.length < CHEERIO_MIN_TEXT_LENGTH || isGarbageText(pageText)) && playwrightBudget > 0) {
@@ -1426,6 +1544,12 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
       .trim()
       .slice(0, 50_000);
 
+    const foundDocCodes = new Set<string>(mandatoryDocs.keys());
+    const mandatoryDocuments = [
+      ...mandatoryDocs.values(),
+      ...buildMissingMandatoryDocuments(foundDocCodes, { homepageDisclosureLinkFound }),
+    ].sort((a, b) => a.name.localeCompare(b.name));
+
     // POST results
     await post('/internal/crawl-result', {
       sessionId,
@@ -1446,6 +1570,7 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
       scanConfidence,
       scanConfidenceLabel,
       facts: allFacts,
+      mandatoryDocuments,
       preliminaryScore: preliminary,
       playwrightBudgetUsed: PLAYWRIGHT_HARD_BUDGET - playwrightBudget,
     }, 30_000);

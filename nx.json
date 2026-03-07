@@ -12,7 +12,7 @@
       "!{projectRoot}/**/*.spec.ts",
       "!{projectRoot}/**/*.test.ts"
     ],
-    "sharedGlobals": ["README.md", ".env.example"]
+    "sharedGlobals": ["{workspaceRoot}/README.md", "{workspaceRoot}/.env.example"]
   },
   "targetDefaults": {
     "build": {

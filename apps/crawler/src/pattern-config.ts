@@ -17,6 +17,7 @@ const DEFAULT_CONFIG: PatternConfig = {
     'contact us',
     'about us',
     'principal message',
+    'public disclosure',
     'mandatory public disclosure',
     'footer',
     'admission page',
@@ -161,4 +162,3 @@ export function getPatternConfig(): PatternConfig {
 export function isPatternConfigLoaded(): boolean {
   return loaded;
 }
-

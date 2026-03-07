@@ -199,6 +199,53 @@ export async function closePlaywrightBrowser(): Promise<void> {
 }
 
 /* ------------------------------------------------------------------ */
+/*  PDF fetch                                                          */
+/* ------------------------------------------------------------------ */
+
+export async function fetchPdfBuffer(
+  url: string,
+  timeoutMs = 20_000,
+  maxBytes = 8 * 1024 * 1024,
+): Promise<{ buffer: Buffer; contentType: string; contentLength: number; statusCode: number }> {
+  const domain = new URL(url).hostname;
+  await acquireDomainSlot(domain);
+  try {
+    const res = await httpClient.get(url, {
+      timeout: timeoutMs,
+      headers: {
+        'User-Agent': randomUA(),
+        Accept: 'application/pdf,application/octet-stream;q=0.9,*/*;q=0.8',
+      },
+      responseType: 'arraybuffer',
+      validateStatus: (s) => s < 500,
+    });
+
+    if (res.status >= 400) {
+      throw new Error(`PDF fetch failed with HTTP ${res.status}`);
+    }
+
+    const contentType = String(res.headers['content-type'] || '');
+    const headerLength = parseInt(String(res.headers['content-length'] || '0'), 10);
+    const body = Buffer.from(res.data as ArrayBuffer);
+    const contentLength = Number.isFinite(headerLength) && headerLength > 0 ? headerLength : body.length;
+
+    const isPdfByHeader = contentType.toLowerCase().includes('application/pdf');
+    const isPdfByUrl = url.toLowerCase().includes('.pdf');
+    if (!isPdfByHeader && !isPdfByUrl) {
+      throw new Error(`Unexpected content-type for PDF URL: ${contentType || 'unknown'}`);
+    }
+
+    if (contentLength > maxBytes || body.length > maxBytes) {
+      throw new Error(`PDF too large: ${Math.round(contentLength / 1024)}KB`);
+    }
+
+    return { buffer: body, contentType, contentLength, statusCode: res.status };
+  } finally {
+    releaseDomainSlot(domain);
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /*  HEAD check (for PDF size filtering)                                */
 /* ------------------------------------------------------------------ */
 

@@ -42,6 +42,8 @@ const HARD_SKIP_PATTERNS: RegExp[] = [
 /** Tier 0: mandatory disclosure / affiliation docs (highest priority) */
 const TIER_0_PATTERNS: RegExp[] = [
   /mandatory[-_]?disclosure/i,
+  /mandatory[-_]?public[-_]?disclosure/i,
+  /public[-_]?disclosure/i,
   /cbse[-_]?disclosure/i,
   /affiliation[-_]?certificate/i,
   /noc[-_]?certificate/i,

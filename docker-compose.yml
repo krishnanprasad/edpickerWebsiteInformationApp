@@ -15,6 +15,8 @@ services:
       - ./sql/migrations/002_early_identity.sql:/docker-entrypoint-initdb.d/03-early-identity.sql:ro
       - ./sql/migrations/003_crawler_v2.sql:/docker-entrypoint-initdb.d/04-crawler-v2.sql:ro
       - ./sql/migrations/004_compare_lists.sql:/docker-entrypoint-initdb.d/05-compare-lists.sql:ro
+      - ./sql/migrations/005_schools_registry.sql:/docker-entrypoint-initdb.d/06-schools-registry.sql:ro
+      - ./sql/migrations/006_mandatory_documents.sql:/docker-entrypoint-initdb.d/07-mandatory-documents.sql:ro
 
   redis:
     image: redis:7-alpine

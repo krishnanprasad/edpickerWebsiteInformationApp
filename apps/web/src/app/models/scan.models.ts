@@ -104,6 +104,19 @@ export interface EarlyIdentity {
   address?: string;
 }
 
+export type MandatoryDocumentStatus = 'present' | 'missing' | 'needs_review';
+
+export interface MandatoryDocumentAudit {
+  code: string;
+  name: string;
+  status: MandatoryDocumentStatus;
+  sourceUrl: string | null;
+  expiryDate: string | null;
+  details: Record<string, unknown>;
+  reviewMessage: string | null;
+  confidence: number;
+}
+
 export interface ScanResponse {
   sessionId: string;
   url: string;
@@ -120,6 +133,8 @@ export interface ScanResponse {
 
   // Crawl summary
   crawlSummary?: CrawlSummary;
+  mandatoryDocuments?: MandatoryDocumentAudit[];
+  documentReviewMessage?: string;
 
   // Scores (only when Ready)
   overallScore?: number;
