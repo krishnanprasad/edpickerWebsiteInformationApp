@@ -180,6 +180,22 @@ interface CrawlMandatoryDocument {
   confidence?: number;
 }
 
+const SAFETY_FIELDS = new Set([
+  'fire_certificate',
+  'sanitary_certificate',
+  'cctv_mention',
+  'transport_safety',
+  'anti_bullying_policy',
+]);
+const SAFETY_VALUES = new Set(['found', 'missing', 'unclear']);
+const CLARITY_FIELDS = new Set([
+  'admission_dates_visible',
+  'fee_clarity',
+  'academic_calendar',
+  'contact_and_map',
+  'results_published',
+]);
+
 function normalizeMandatoryDocumentStatus(value: unknown): MandatoryDocumentStatus {
   const v = String(value || '').toLowerCase();
   if (v === 'present' || v === 'missing' || v === 'needs_review') return v;
@@ -642,7 +658,8 @@ async function refreshSession(sessionId: string): Promise<{ ok: true; sessionId:
            preliminary_score = NULL,
            facts_extracted = 0,
            urls_discovered = 0,
-           playwright_budget_used = 0
+           playwright_budget_used = 0,
+           audit_status = 'pending'
        WHERE id = $1`,
       [sessionId],
     );
@@ -1148,14 +1165,20 @@ app.get('/api/scan/:id/red-flags', async (req, res) => {
 
   // ── Rule-based flags from clarity_scores ───────────────────────────
   const clarityRow = await pgPool.query(
-    `SELECT fee_clarity, admission_dates_visible, contact_and_map, results_published, academic_calendar
+    `SELECT fee_clarity, fee_source, admission_dates_visible, contact_and_map, results_published, academic_calendar
      FROM clarity_scores WHERE session_id = $1`,
     [sessionId]
   );
   if (clarityRow.rowCount) {
     const c = clarityRow.rows[0];
-    if (!c.fee_clarity)
-      flags.push({ severity: 'high', flag: 'Fee structure not disclosed', reason: 'Families cannot find clear fee breakdowns. CBSE mandates fee transparency on school websites.' });
+    if (!c.fee_clarity) {
+      const feeSource = c.fee_source ? String(c.fee_source) : null;
+      if (!feeSource) {
+        flags.push({ severity: 'high', flag: 'Fee structure not disclosed', reason: 'Families cannot find clear fee breakdowns. CBSE mandates fee transparency on school websites.' });
+      } else {
+        flags.push({ severity: 'medium', flag: 'Fee details unclear', reason: `Fee information appears via ${feeSource}, but clear payable amounts are still not easily visible for parents.` });
+      }
+    }
     if (!c.admission_dates_visible)
       flags.push({ severity: 'medium', flag: 'Admission timeline not published', reason: 'No clear admission process or deadline dates were found on the website.' });
     if (!c.contact_and_map)
@@ -1338,6 +1361,7 @@ app.get('/api/scan/:id', async (req, res) => {
             pages_scanned, pdfs_scanned, images_scanned,
             max_depth_reached, structured_data_detected,
             scan_duration_ms, scan_confidence, scan_confidence_label,
+            audit_status,
             early_identity,
             created_at, completed_at
      FROM analysis_sessions WHERE id = $1`,
@@ -1354,6 +1378,7 @@ app.get('/api/scan/:id', async (req, res) => {
     sessionId: session.id,
     url: session.url,
     status,
+    auditStatus: session.audit_status ?? 'pending',
     createdAt: session.created_at,
   };
 
@@ -1449,15 +1474,27 @@ app.get('/api/scan/:id', async (req, res) => {
     if (safetyResult.rowCount) {
       const s = safetyResult.rows[0];
       const evidence = (s.raw_evidence || {}) as Record<string, string | null>;
+      const safetySourceResult = await pgPool.query(
+        `SELECT fact_key, source_url, confidence
+         FROM crawl_facts
+         WHERE session_id = $1
+           AND fact_key IN ('fire_certificate', 'sanitary_certificate', 'cctv_mention', 'transport_safety', 'anti_bullying_policy')
+         ORDER BY confidence DESC`,
+        [sessionId],
+      );
+      const safetySourceMap = new Map<string, string>();
+      for (const row of safetySourceResult.rows as Array<{ fact_key: string; source_url: string }>) {
+        if (!safetySourceMap.has(row.fact_key)) safetySourceMap.set(row.fact_key, row.source_url);
+      }
       response.safetyScore = {
         total: s.total_score,
         badge: s.badge_level,
         items: {
-          fireCertificate: { status: s.fire_certificate, evidence: evidence.fire_evidence ?? null },
-          sanitaryCertificate: { status: s.sanitary_certificate, evidence: evidence.sanitary_evidence ?? null },
-          cctvMention: { status: s.cctv_mention, evidence: evidence.cctv_evidence ?? null },
-          transportSafety: { status: s.transport_safety, evidence: evidence.transport_evidence ?? null },
-          antiBullyingPolicy: { status: s.anti_bullying_policy, evidence: evidence.anti_bullying_evidence ?? null },
+          fireCertificate: { status: s.fire_certificate, evidence: evidence.fire_evidence ?? null, sourceUrl: safetySourceMap.get('fire_certificate') ?? null },
+          sanitaryCertificate: { status: s.sanitary_certificate, evidence: evidence.sanitary_evidence ?? null, sourceUrl: safetySourceMap.get('sanitary_certificate') ?? null },
+          cctvMention: { status: s.cctv_mention, evidence: evidence.cctv_evidence ?? null, sourceUrl: safetySourceMap.get('cctv_mention') ?? null },
+          transportSafety: { status: s.transport_safety, evidence: evidence.transport_evidence ?? null, sourceUrl: safetySourceMap.get('transport_safety') ?? null },
+          antiBullyingPolicy: { status: s.anti_bullying_policy, evidence: evidence.anti_bullying_evidence ?? null, sourceUrl: safetySourceMap.get('anti_bullying_policy') ?? null },
         },
       };
     }
@@ -1465,7 +1502,7 @@ app.get('/api/scan/:id', async (req, res) => {
     const clarityResult = await pgPool.query(
       `SELECT total_score, clarity_label,
               admission_dates_visible, fee_clarity, academic_calendar,
-              contact_and_map, results_published
+              contact_and_map, results_published, fee_source
        FROM clarity_scores WHERE session_id = $1`,
       [sessionId],
     );
@@ -1481,6 +1518,7 @@ app.get('/api/scan/:id', async (req, res) => {
           academicCalendar: c.academic_calendar,
           contactAndMap: c.contact_and_map,
           resultsPublished: c.results_published,
+          feeSource: c.fee_source ?? null,
         },
       };
     }
@@ -1597,6 +1635,7 @@ app.post('/internal/crawl-result', async (req, res) => {
     maxDepthReached, structuredDataDetected,
     scanDurationMs, scanConfidence, scanConfidenceLabel,
     facts, mandatoryDocuments, preliminaryScore, playwrightBudgetUsed,
+    feeSource,
   } = req.body as {
     sessionId: string;
     pageUrl: string;
@@ -1615,6 +1654,7 @@ app.post('/internal/crawl-result', async (req, res) => {
     mandatoryDocuments?: CrawlMandatoryDocument[];
     preliminaryScore?: { safety: number; clarity: number; overall: number };
     playwrightBudgetUsed?: number;
+    feeSource?: 'html' | 'pdf' | 'secondary_html' | null;
   };
 
   // Save per-page rows if available, otherwise fall back to combined blob
@@ -1687,7 +1727,7 @@ app.post('/internal/crawl-result', async (req, res) => {
   }
 
   // Enqueue scoring
-  await scoringQueue.add('score-job', { sessionId, url: pageUrl, extractedText });
+  await scoringQueue.add('score-job', { sessionId, url: pageUrl, extractedText, feeSource: feeSource ?? null });
 
   res.json({ ok: true });
 });
@@ -1726,6 +1766,7 @@ app.post('/internal/score-complete', async (req, res) => {
       academic_calendar: boolean;
       contact_and_map: boolean;
       results_published: boolean;
+      fee_source?: string | null;
     };
   };
 
@@ -1765,16 +1806,17 @@ app.post('/internal/score-complete', async (req, res) => {
   // Upsert clarity score
   await pgPool.query(
     `INSERT INTO clarity_scores
-       (session_id, total_score, admission_dates_visible, fee_clarity, academic_calendar, contact_and_map, results_published, clarity_label)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       (session_id, total_score, admission_dates_visible, fee_clarity, academic_calendar, contact_and_map, results_published, clarity_label, fee_source)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      ON CONFLICT (session_id) DO UPDATE SET
        total_score = $2, admission_dates_visible = $3, fee_clarity = $4,
-       academic_calendar = $5, contact_and_map = $6, results_published = $7, clarity_label = $8`,
+       academic_calendar = $5, contact_and_map = $6, results_published = $7, clarity_label = $8, fee_source = $9`,
     [
       sessionId, clarityScore.total,
       clarityScore.admission_dates_visible, clarityScore.fee_clarity,
       clarityScore.academic_calendar, clarityScore.contact_and_map,
       clarityScore.results_published, clarityScore.label,
+      clarityScore.fee_source ?? null,
     ],
   );
 
@@ -1821,6 +1863,71 @@ app.post('/internal/crawl-failed', async (req, res) => {
   }
 
   res.json({ ok: true });
+});
+
+/* ================================================================== */
+/*  POST /internal/audit-result -- async Gemini audit callback         */
+/* ================================================================== */
+
+app.post('/internal/audit-result', async (req, res) => {
+  if (!requireInternalKey(req, res)) return;
+
+  const { sessionId, provider, model, audit } = req.body as {
+    sessionId: string;
+    provider?: string;
+    model?: string;
+    audit?: {
+      safety?: Record<string, string>;
+      clarity?: Record<string, string>;
+      notes?: string;
+    };
+  };
+
+  if (!sessionId || !audit || typeof audit !== 'object') {
+    return res.status(400).json({ error: 'Invalid audit payload' });
+  }
+
+  const normalizedSafety: Record<string, string> = {};
+  const normalizedClarity: Record<string, boolean> = {};
+
+  if (audit.safety && typeof audit.safety === 'object') {
+    for (const [field, value] of Object.entries(audit.safety)) {
+      if (!SAFETY_FIELDS.has(field)) continue;
+      const corrected = String(value || '').toLowerCase();
+      if (!SAFETY_VALUES.has(corrected)) continue;
+      normalizedSafety[field] = corrected;
+    }
+  }
+
+  if (audit.clarity && typeof audit.clarity === 'object') {
+    for (const [field, value] of Object.entries(audit.clarity)) {
+      if (!CLARITY_FIELDS.has(field)) continue;
+      const raw = String(value || '').toLowerCase();
+      if (raw === 'true') normalizedClarity[field] = true;
+      if (raw === 'false') normalizedClarity[field] = false;
+    }
+  }
+
+  await pgPool.query(
+    `INSERT INTO ai_audit_log (session_id, provider, model, audit_data, notes)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [
+      sessionId,
+      (provider || 'gemini').slice(0, 40),
+      (model || '').slice(0, 120) || null,
+      JSON.stringify({ safety: normalizedSafety, clarity: normalizedClarity }),
+      cleanText(audit.notes, 1000),
+    ],
+  );
+
+  await pgPool.query(
+    `UPDATE analysis_sessions
+     SET audit_status = 'completed'
+     WHERE id = $1`,
+    [sessionId],
+  );
+
+  return res.json({ ok: true });
 });
 
 /* ================================================================== */

@@ -91,6 +91,9 @@ const internalApiKey = process.env.INTERNAL_API_KEY ?? 'change-me';
 const openAiApiKey = process.env.OPENAI_API_KEY ?? '';
 const openAiBaseUrl = process.env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1';
 const scoringModel = process.env.OPENAI_MODEL_SCORING ?? 'gpt-4o-mini';
+const geminiApiKey = process.env.GEMINI_API_KEY ?? '';
+const geminiModelScoring = process.env.GEMINI_MODEL_SCORING ?? 'gemini-1.5-flash-8b';
+const geminiModelAudit = process.env.GEMINI_MODEL_AUDIT ?? 'gemini-1.5-flash-8b';
 const classifyQueueName = process.env.CLASSIFY_QUEUE_NAME || 'schoollens-classify';
 const crawlQueueName = process.env.CRAWLER_QUEUE_NAME || 'schoollens-crawl';
 const scoringQueueName = process.env.SCORING_QUEUE_NAME || 'schoollens-score';
@@ -357,6 +360,131 @@ async function callOpenAiJson(systemPrompt: string, userPrompt: string, maxToken
     console.error('OpenAI call failed:', err instanceof Error ? err.message : err);
     return null;
   }
+}
+
+function parseJsonObjectFromText(input: string): Record<string, unknown> | null {
+  const trimmed = (input || '').trim();
+  if (!trimmed) return null;
+
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    const start = trimmed.indexOf('{');
+    const end = trimmed.lastIndexOf('}');
+    if (start < 0 || end <= start) return null;
+    try {
+      const parsed = JSON.parse(trimmed.slice(start, end + 1)) as unknown;
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+async function callGeminiJson(
+  systemPrompt: string,
+  userPrompt: string,
+  model = geminiModelScoring,
+): Promise<Record<string, unknown> | null> {
+  if (!geminiApiKey) return null;
+  try {
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(geminiApiKey)}`;
+    const res = await axios.post(
+      endpoint,
+      {
+        generationConfig: {
+          temperature: 0,
+          responseMimeType: 'application/json',
+        },
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }],
+          },
+        ],
+      },
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 60_000,
+      },
+    );
+    const text = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text || typeof text !== 'string') return null;
+    return parseJsonObjectFromText(text);
+  } catch (err) {
+    console.error('Gemini call failed:', err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+async function callAiJson(
+  systemPrompt: string,
+  userPrompt: string,
+  maxTokens = 800,
+): Promise<{ provider: 'openai' | 'gemini' | null; result: Record<string, unknown> | null }> {
+  const openAiResult = await callOpenAiJson(systemPrompt, userPrompt, maxTokens);
+  if (openAiResult) return { provider: 'openai', result: openAiResult };
+
+  const geminiResult = await callGeminiJson(systemPrompt, userPrompt, geminiModelScoring);
+  if (geminiResult) return { provider: 'gemini', result: geminiResult };
+
+  return { provider: null, result: null };
+}
+
+async function auditWithGemini(params: {
+  sessionId: string;
+  sourceUrl: string;
+  text: string;
+  safety: SafetyResult;
+  clarity: ClarityResult;
+}): Promise<void> {
+  if (!geminiApiKey) return;
+
+  const prompt = `Validate the extracted school audit output and suggest corrections.
+Return JSON only:
+{
+  "safety": {
+    "fire_certificate": "found|missing|unclear",
+    "sanitary_certificate": "found|missing|unclear",
+    "cctv_mention": "found|missing|unclear",
+    "transport_safety": "found|missing|unclear",
+    "anti_bullying_policy": "found|missing|unclear"
+  },
+  "clarity": {
+    "admission_dates_visible": "true|false",
+    "fee_clarity": "true|false",
+    "academic_calendar": "true|false",
+    "contact_and_map": "true|false",
+    "results_published": "true|false"
+  },
+  "notes": "short audit rationale"
+}
+Use strict values only.`;
+
+  const current = {
+    safety: params.safety,
+    clarity: params.clarity,
+  };
+
+  const auditResult = await callGeminiJson(
+    prompt,
+    `URL: ${params.sourceUrl}\nCurrent extraction JSON: ${JSON.stringify(current)}\nWebsite text:\n${params.text.slice(0, 25_000)}`,
+    geminiModelAudit,
+  );
+
+  if (!auditResult) return;
+
+  await post('/internal/audit-result', {
+    sessionId: params.sessionId,
+    provider: 'gemini',
+    model: geminiModelAudit,
+    audit: auditResult,
+  }, 15_000);
 }
 
 /* ================================================================== */
@@ -1260,11 +1388,19 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
   const allFacts: CrawlFact[] = [];
   const pageEntries: PageEntry[] = [];
   const mandatoryDocs = new Map<string, MandatoryDocumentAudit>();
+  const crawledUrlSet = new Set<string>();
   let homepageDisclosureLinkFound = false;
   let playwrightBudget = PLAYWRIGHT_HARD_BUDGET;
   let pdfsFound = 0;
   let imagesFound = 0;
+  let feeSource: 'html' | 'pdf' | 'secondary_html' | null = null;
   const startTime = Date.now();
+  const markFeeSource = (facts: CrawlFact[], source: 'html' | 'pdf' | 'secondary_html') => {
+    if (feeSource) return;
+    if (facts.some((f) => f.key === 'fee_clarity' && f.value === 'true')) {
+      feeSource = source;
+    }
+  };
 
   const heartbeatTimer = setInterval(() => {
     post('/internal/heartbeat', { sessionId }).catch(() => {});
@@ -1304,6 +1440,7 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
       homepageUsedPlaywright = true;
     }
     seen.add(url);
+    crawledUrlSet.add(url);
 
     // 2. Extract early identity
     const identity = extractIdentity(homepageResult.$, homepageResult.html, url);
@@ -1318,6 +1455,7 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
     pageEntries.push({ url, title: homepageTitle, text: homepageText });
     const homepageFacts = extractFacts(homepageText, url, 'homepage');
     allFacts.push(...homepageFacts);
+    markFeeSource(homepageFacts, 'html');
     imagesFound += homepageResult.$('img').length;
     homepageDisclosureLinkFound = homepageResult.$('a[href]').toArray().some((el) => {
       const anchor = homepageResult.$(el);
@@ -1382,6 +1520,7 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
 
     for (let i = 0; i < urlLimit; i++) {
       const { url: pageUrl, tier } = discoveredUrls[i];
+      crawledUrlSet.add(pageUrl);
 
       try {
         // PDF handling
@@ -1428,6 +1567,7 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
             const sourceType = tier === 0 ? 'mandatory_pdf' : 'inner_pdf';
             const pageFacts = extractFacts(pdfText, pageUrl, sourceType);
             allFacts.push(...pageFacts);
+            markFeeSource(pageFacts, 'pdf');
 
             const auditedDoc = analyzeMandatoryPdf(pageUrl, pdfText);
             if (auditedDoc) {
@@ -1550,6 +1690,7 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
         const sourceType = tier === 0 ? 'mandatory' : 'inner_page';
         const pageFacts = extractFacts(pageText, pageUrl, sourceType);
         allFacts.push(...pageFacts);
+        markFeeSource(pageFacts, 'html');
 
         // Refine identity from inner pages (contact, about, principal, etc.)
         if (/\b(contact|about|principal|headmaster|headmistress|director|staff|faculty|address|reach|vision|mission|motto)\b/i.test(pageUrl)) {
@@ -1593,6 +1734,40 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
     /* ============================================================ */
 
     const preliminary = computePreliminaryScore(allFacts);
+    const hasFeeClarity = allFacts.some((f) => f.key === 'fee_clarity' && f.value === 'true');
+
+    if (!hasFeeClarity) {
+      const secondaryFeeUrls = discoveredUrls
+        .filter((u) => !crawledUrlSet.has(u.url))
+        .map((u) => u.url)
+        .filter((u) => /\b(fee|fees|tuition|payment|finance)\b/i.test(u))
+        .slice(0, 6);
+
+      for (const feeUrl of secondaryFeeUrls) {
+        try {
+          const result = await fetchWithCheerio(feeUrl, 10_000);
+          if (result.statusCode >= 400) continue;
+          const feeText = extractCleanText(result.$);
+          if (feeText.length < 50) continue;
+          pagesScanned++;
+          crawledUrlSet.add(feeUrl);
+          const feeFacts = extractFacts(feeText, feeUrl, 'secondary_html');
+          allFacts.push(...feeFacts);
+          markFeeSource(feeFacts, 'secondary_html');
+          pageEntries.push({
+            url: feeUrl,
+            title: result.$('title').text().trim() || feeUrl,
+            text: feeText,
+          });
+          await emitEvent(sessionId, 'page_crawled', {
+            url: feeUrl, method: 'secondary_cheerio', tier: 1, factsFound: feeFacts.length,
+          });
+          if (feeFacts.some((f) => f.key === 'fee_clarity' && f.value === 'true')) break;
+        } catch {
+          // Optional secondary pass; ignore errors.
+        }
+      }
+    }
     const scanDurationMs = Date.now() - startTime;
 
     console.log(`[${sessionId.slice(0, 8)}] Done: ${pagesScanned} pages, ${allFacts.length} facts, ${scanDurationMs}ms`);
@@ -1652,6 +1827,7 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
       mandatoryDocuments,
       preliminaryScore: preliminary,
       playwrightBudgetUsed: PLAYWRIGHT_HARD_BUDGET - playwrightBudget,
+      feeSource,
     }, 30_000);
   } finally {
     clearInterval(heartbeatTimer);
@@ -1796,7 +1972,12 @@ function computeClarityScore(clarity: ClarityResult): { total: number; label: st
 const scoringWorker = new Worker(
   scoringQueueName,
   async (job) => {
-    const { sessionId, url, extractedText } = job.data as { sessionId: string; url?: string; extractedText?: string };
+    const { sessionId, url, extractedText, feeSource } = job.data as {
+      sessionId: string;
+      url?: string;
+      extractedText?: string;
+      feeSource?: 'html' | 'pdf' | 'secondary_html' | null;
+    };
     const text = extractedText || '';
 
     await emitEvent(sessionId, 'scoring_start', {});
@@ -1804,11 +1985,12 @@ const scoringWorker = new Worker(
     let safety: SafetyResult;
     let clarity: ClarityResult;
 
-    const aiResult = await callOpenAiJson(
+    const aiCall = await callAiJson(
       SCORING_SYSTEM_PROMPT,
       `Analyze this school website content:\n\n${text.slice(0, 30_000)}`,
       800,
     );
+    const aiResult = aiCall.result;
 
     if (aiResult?.safety && aiResult?.clarity) {
       safety = aiResult.safety as unknown as SafetyResult;
@@ -1872,8 +2054,19 @@ const scoringWorker = new Worker(
         academic_calendar: clarity.academic_calendar,
         contact_and_map: clarity.contact_and_map,
         results_published: clarity.results_published,
+        fee_source: feeSource ?? null,
       },
     }, 30_000);
+
+    if (aiCall.provider === 'openai') {
+      auditWithGemini({
+        sessionId,
+        sourceUrl: url || '',
+        text,
+        safety,
+        clarity,
+      }).catch(() => {});
+    }
 
     await emitTerminalEvent(sessionId, 'complete', { overallScore });
   },
