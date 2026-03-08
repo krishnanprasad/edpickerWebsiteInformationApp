@@ -180,7 +180,12 @@ import { SchoolIdentity, ScanResponse, ScanStatus, SSEEvent, RedFlagsResponse, R
           </div>
 
               <app-safety-score *ngIf="homeScan?.safetyScore" [score]="homeScan?.safetyScore || null" (askAi)="triggerAskAi($event)"></app-safety-score>
-              <app-clarity-score *ngIf="homeScan?.clarityScore" [score]="homeScan?.clarityScore || null" (askAi)="triggerAskAi($event)"></app-clarity-score>
+              <app-clarity-score
+                *ngIf="homeScan?.clarityScore"
+                [score]="homeScan?.clarityScore || null"
+                [earlyIdentity]="homeScan?.earlyIdentity || null"
+                [summary]="homeScan?.summary || null"
+                (askAi)="triggerAskAi($event)"></app-clarity-score>
               <app-crawl-summary *ngIf="isAdmin && homeScan?.crawlSummary" [summary]="homeScan?.crawlSummary || null"></app-crawl-summary>
 
             </div><!-- /home-left-column -->
@@ -295,6 +300,7 @@ import { SchoolIdentity, ScanResponse, ScanStatus, SSEEvent, RedFlagsResponse, R
               <button class="qj-btn" (click)="scrollToSection('section-academics')">Academics</button>
               <button class="qj-btn" (click)="scrollToSection('section-fees')">Fees</button>
               <button class="qj-btn" (click)="scrollToSection('section-admissions')">Admissions</button>
+              <button class="qj-btn" (click)="scrollToSection('section-extracurricular')">Extra Curricular</button>
             </nav>
 
             <div class="table-wrap">
@@ -1315,6 +1321,7 @@ export class AppComponent implements OnInit, OnDestroy {
       board,
       websiteUrl: scan.url,
       phone: early.phone ? String(early.phone) : null,
+      phones: Array.isArray(early.phones) ? early.phones.map((p: unknown) => String(p)).filter((p: string) => p.trim().length > 0).slice(0, 3) : null,
       email: early.email ? String(early.email) : null,
       address: early.address ? String(early.address) : null,
       principal: early.principalName ? String(early.principalName) : 'Not Able to Identify - Missing Data.',
@@ -1699,7 +1706,9 @@ export class AppComponent implements OnInit, OnDestroy {
     // 4. Contact info
     if (ei) {
       const contact: string[] = [];
-      if (ei.phone) contact.push(`phone (${ei.phone})`);
+      const phones = Array.isArray((ei as any).phones) ? (ei as any).phones.filter((p: unknown) => !!p) : [];
+      if (phones.length > 0) contact.push(`phones (${phones.slice(0, 2).join(', ')})`);
+      else if (ei.phone) contact.push(`phone (${ei.phone})`);
       if (ei.email) contact.push('email');
       if (ei.address) contact.push('address');
       if (contact.length > 0) points.push({ icon: '📞', text: `Contact info available: ${contact.join(', ')}.`, source: 'Extracted from school website' });

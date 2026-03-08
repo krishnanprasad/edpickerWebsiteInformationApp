@@ -64,6 +64,13 @@ Extract the **actual school principal name**, avoiding confusion with chairman, 
    - found in disclosure/staff table
    - found as signature + designation pair
 
+## Additional Parser Notes (2026-03)
+
+- Accept designation-in-parentheses patterns such as `Mrs. B Hemamalini (Principal)`.
+- Accept uppercase or initial-based names near principal labels (e.g., `B HEMAMALINI`, `R. KALAIVANI`).
+- Reject lowercase phrase captures near `principal` (for example: `to provide a full`) unless they pass person-name validation.
+- On dedicated principal pages, prioritize the nearest heading/profile name before generic paragraph text.
+
 ## Recommended Confidence
 - **High**: dedicated principal page + explicit designation
 - **Medium**: staff/management section with exact role match

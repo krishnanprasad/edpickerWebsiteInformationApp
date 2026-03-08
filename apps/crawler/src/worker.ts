@@ -583,6 +583,7 @@ function extractFacts(text: string, sourceUrl: string, sourceType: string): Craw
 interface EarlyIdentity {
   schoolName?: string;
   principalName?: string;
+  phones?: string[];
   foundingYear?: string;
   vision?: string;
   mission?: string;
@@ -694,6 +695,49 @@ function extractFacilitiesFromText(text: string): string[] {
   return facilities.slice(0, 8);
 }
 
+function normalizeCandidatePhone(raw: string): string | null {
+  const compact = raw.replace(/[^\d+]/g, '').replace(/(?!^)\+/g, '');
+  if (!compact) return null;
+  const digits = compact.replace(/\D/g, '');
+  if (digits.length < 10 || digits.length > 13) return null;
+  if (/^(\d)\1+$/.test(digits)) return null;
+  if (digits === '1234567890' || digits === '0123456789') return null;
+  if (digits.length === 10 && !/^[6-9]\d{9}$/.test(digits)) return null;
+  if (digits.length === 12 && digits.startsWith('91') && !/^[6-9]\d{9}$/.test(digits.slice(2))) return null;
+  if (digits.length === 11 && digits.startsWith('0') && !/^[6-9]\d{9}$/.test(digits.slice(1))) return null;
+  if (compact.startsWith('+')) return `+${digits}`;
+  return digits;
+}
+
+function extractPhoneCandidates(
+  $: import('cheerio').CheerioAPI,
+  bodyText: string,
+  phoneLabelPattern: string,
+): string[] {
+  const candidates: string[] = [];
+  $('a[href^="tel:"]').each((_, el) => {
+    const href = ($(el).attr('href') || '').replace(/^tel:/i, '').trim();
+    const normalized = normalizeCandidatePhone(href);
+    if (normalized) candidates.push(normalized);
+  });
+
+  const phonePatterns = [
+    new RegExp(`(?:${phoneLabelPattern}|mob(?:ile)?)\\s*(?:no\\.?|number|#)?\\s*[:.\\-]?\\s*(\\+?91[\\s\\-]?\\d[\\d\\s\\-]{8,12}\\d)`, 'ig'),
+    new RegExp(`(?:${phoneLabelPattern}|mob(?:ile)?)\\s*(?:no\\.?|number|#)?\\s*[:.\\-]?\\s*(0\\d{2,4}[\\s\\-]?\\d{6,8})`, 'ig'),
+    new RegExp(`(?:${phoneLabelPattern}|mob(?:ile)?)\\s*(?:no\\.?|number|#)?\\s*[:.\\-]?\\s*(\\d{10})`, 'ig'),
+    /(?:\+?91[\s\-]?)?[6-9]\d{9}/g,
+  ];
+  for (const pat of phonePatterns) {
+    const matches = [...bodyText.matchAll(pat)];
+    for (const m of matches) {
+      const candidate = normalizeCandidatePhone(m?.[1] || m?.[0] || '');
+      if (candidate) candidates.push(candidate);
+    }
+  }
+
+  return Array.from(new Set(candidates)).slice(0, 3);
+}
+
 function inferBoardFromText(text: string): string | null {
   const lower = text.toLowerCase();
   if (/\bcbse\b/.test(lower)) return 'CBSE';
@@ -712,8 +756,11 @@ function looksLikePrincipalName(candidateRaw: string, principalBlockedPattern: s
   if (/(?:auditorium|guidance|counselling|counseling|room|block|office|lab|class|department|campus)/i.test(candidate)) return false;
   if (/\b(school|academy|vidya|mandhir|mandir|college|institute|foundation|desk|message|welcome|phone|email|address)\b/i.test(candidate)) return false;
   if (principalBlockedPattern && new RegExp(`\\b(?:${principalBlockedPattern})\\b`, 'i').test(candidate)) return false;
-  const tokenCount = candidate.split(/\s+/).length;
+  const tokens = candidate.split(/\s+/).filter(Boolean);
+  const tokenCount = tokens.length;
   if (tokenCount > 6) return false;
+  if (tokenCount < 2) return false;
+  if (!tokens.every((token) => /^[A-Z][A-Za-z.'-]*$/.test(token) || /^[A-Z]+$/.test(token) || /^[A-Z]\.$/.test(token))) return false;
   return /^[A-Za-z.\s'-]+$/.test(candidate);
 }
 
@@ -848,6 +895,8 @@ function extractIdentity($: import('cheerio').CheerioAPI, _html: string, _url: s
     new RegExp(`(?:${principalRolePattern})\\s*(?:[:,\\-]|is|name)?\\s*${NAME_PART}`, 'i'),
     // "Mrs. R. Kalaivani, Principal"
     new RegExp(`${NAME_PART}\\s*,?\\s*(?:${principalRolePattern})`, 'i'),
+    // "Mrs. B Hemamalini (Principal)"
+    new RegExp(`${NAME_PART}\\s*\\(\\s*(?:${principalRolePattern})\\s*\\)`, 'i'),
   ];
   for (const pat of principalPatterns) {
     const m = bodyText.match(pat);
@@ -864,7 +913,7 @@ function extractIdentity($: import('cheerio').CheerioAPI, _html: string, _url: s
   if (!identity.principalName) {
     const noHonorificPatterns = [
       // "RAJA SUNDARI N, Principal" or "Ramesh Kumar, Principal"
-      new RegExp(`([A-Z][A-Za-z.]+(?:\\s+[A-Z][A-Za-z.]*){0,4})\\s*,?\\s*(?:${principalRolePattern})\\b`, 'i'),
+      new RegExp(`([A-Z][A-Za-z.]+(?:\\s+[A-Z][A-Za-z.]*){0,4})\\s*(?:,|\\(|-)?\\s*(?:${principalRolePattern})\\b`, 'i'),
       // "Principal: RAJA SUNDARI N" / "Principal - Ramesh Kumar"
       new RegExp(`(?:${principalRolePattern})\\s*[:.\\-,]?\\s*([A-Z][A-Za-z.]+(?:\\s+[A-Z][A-Za-z.]*){0,4})`, 'i'),
     ];
@@ -901,45 +950,11 @@ function extractIdentity($: import('cheerio').CheerioAPI, _html: string, _url: s
     });
   }
 
-  /* -- Phone extraction -- */
-  const normalizeCandidatePhone = (raw: string): string | null => {
-    const compact = raw.replace(/[^\d+]/g, '').replace(/(?!^)\+/g, '');
-    if (!compact) return null;
-    const digits = compact.replace(/\D/g, '');
-    if (digits.length < 10 || digits.length > 13) return null;
-    if (/^(\d)\1+$/.test(digits)) return null;
-    if (digits === '1234567890' || digits === '0123456789') return null;
-    if (digits.length === 10 && !/^[6-9]\d{9}$/.test(digits)) return null;
-    if (digits.length === 12 && digits.startsWith('91') && !/^[6-9]\d{9}$/.test(digits.slice(2))) return null;
-    if (digits.length === 11 && digits.startsWith('0') && !/^[6-9]\d{9}$/.test(digits.slice(1))) return null;
-    if (compact.startsWith('+')) return `+${digits}`;
-    return digits;
-  };
-
-  $('a[href^="tel:"]').each((_, el) => {
-    if (identity.phone) return;
-    const href = ($(el).attr('href') || '').replace(/^tel:/i, '').trim();
-    const normalized = normalizeCandidatePhone(href);
-    if (normalized) identity.phone = normalized;
-  });
-
-  if (!identity.phone) {
-    const phonePatterns = [
-      new RegExp(`(?:${phoneLabelPattern}|mob(?:ile)?)\\s*(?:no\\.?|number|#)?\\s*[:.\\-]?\\s*(\\+?91[\\s\\-]?\\d[\\d\\s\\-]{8,12}\\d)`, 'ig'),
-      new RegExp(`(?:${phoneLabelPattern}|mob(?:ile)?)\\s*(?:no\\.?|number|#)?\\s*[:.\\-]?\\s*(0\\d{2,4}[\\s\\-]?\\d{6,8})`, 'ig'),
-      new RegExp(`(?:${phoneLabelPattern}|mob(?:ile)?)\\s*(?:no\\.?|number|#)?\\s*[:.\\-]?\\s*(\\d{10})`, 'ig'),
-    ];
-    for (const pat of phonePatterns) {
-      const matches = [...bodyText.matchAll(pat)];
-      for (const m of matches) {
-        const normalized = normalizeCandidatePhone(m?.[1] || '');
-        if (normalized) {
-          identity.phone = normalized;
-          break;
-        }
-      }
-      if (identity.phone) break;
-    }
+  /* -- Phone extraction (multiple) -- */
+  const extractedPhones = extractPhoneCandidates($, bodyText, phoneLabelPattern);
+  if (extractedPhones.length > 0) {
+    identity.phones = extractedPhones;
+    identity.phone = extractedPhones[0];
   }
   /* -- Email extraction (ranked) -- */
   identity.email = chooseBetterEmail(identity.email, extractBestEmail($, bodyText, _url), _url);
@@ -1047,6 +1062,7 @@ function refineIdentity(existing: EarlyIdentity, $: import('cheerio').CheerioAPI
       new RegExp(`${NAME_PART}\\s*,?\\s*(?:${principalRolePattern})`, 'i'),
       // On a principal page, just find an honorific + name (high confidence it's the principal)
       new RegExp(`${NAME_PART}`, 'i'),
+      new RegExp(`${NAME_PART}\\s*\\(\\s*(?:${principalRolePattern})\\s*\\)`, 'i'),
     ];
     for (const pat of patterns) {
       const m = bodyText.match(pat);
@@ -1062,7 +1078,7 @@ function refineIdentity(existing: EarlyIdentity, $: import('cheerio').CheerioAPI
     // Fallback: "NAME, Principal" without honorific
     if (!existing.principalName) {
       const noHonorificPatterns = [
-        new RegExp(`([A-Z][A-Za-z.]+(?:\\s+[A-Z][A-Za-z.]*){0,4})\\s*,?\\s*(?:${principalRolePattern})\\b`, 'i'),
+        new RegExp(`([A-Z][A-Za-z.]+(?:\\s+[A-Z][A-Za-z.]*){0,4})\\s*(?:,|\\(|-)?\\s*(?:${principalRolePattern})\\b`, 'i'),
         new RegExp(`(?:${principalRolePattern})\\s*[:.\\-,]?\\s*([A-Z][A-Za-z.]+(?:\\s+[A-Z][A-Za-z.]*){0,4})`, 'i'),
       ];
       for (const pat of noHonorificPatterns) {
@@ -1100,46 +1116,17 @@ function refineIdentity(existing: EarlyIdentity, $: import('cheerio').CheerioAPI
   }
 
   /* -- Phone from contact/about pages -- */
-  if (!existing.phone) {
-    const normalizeCandidatePhone = (raw: string): string | null => {
-      const compact = raw.replace(/[^\d+]/g, '').replace(/(?!^)\+/g, '');
-      if (!compact) return null;
-      const digits = compact.replace(/\D/g, '');
-      if (digits.length < 10 || digits.length > 13) return null;
-      if (/^(\d)\1+$/.test(digits)) return null;
-      if (digits === '1234567890' || digits === '0123456789') return null;
-      if (digits.length === 10 && !/^[6-9]\d{9}$/.test(digits)) return null;
-      if (digits.length === 12 && digits.startsWith('91') && !/^[6-9]\d{9}$/.test(digits.slice(2))) return null;
-      if (digits.length === 11 && digits.startsWith('0') && !/^[6-9]\d{9}$/.test(digits.slice(1))) return null;
-      if (compact.startsWith('+')) return `+${digits}`;
-      return digits;
-    };
-
-    const telLink = $('a[href^="tel:"]').first().attr('href');
-    if (telLink) {
-      const normalized = normalizeCandidatePhone(telLink.replace('tel:', '').trim());
-      if (normalized) {
-        existing.phone = normalized;
+  {
+    const extractedPhones = extractPhoneCandidates($, bodyText, phoneLabelPattern);
+    if (extractedPhones.length > 0) {
+      const merged = Array.from(new Set([...(existing.phones || []), ...extractedPhones])).slice(0, 3);
+      if (JSON.stringify(merged) !== JSON.stringify(existing.phones || [])) {
+        existing.phones = merged;
         changed = true;
       }
-    }
-
-    if (!existing.phone) {
-      const phonePatterns = [
-        new RegExp(`(?:${phoneLabelPattern}|mob(?:ile)?)\\s*(?:no\\.?|number|#)?\\s*[:.\\-]?\\s*(\\+?91[\\s\\-]?\\d[\\d\\s\\-]{8,12}\\d)`, 'ig'),
-        new RegExp(`(?:${phoneLabelPattern}|mob(?:ile)?)\\s*(?:no\\.?|number|#)?\\s*[:.\\-]?\\s*(0\\d{2,4}[\\s\\-]?\\d{6,8})`, 'ig'),
-        new RegExp(`(?:${phoneLabelPattern}|mob(?:ile)?)\\s*(?:no\\.?|number|#)?\\s*[:.\\-]?\\s*(\\d{10})`, 'ig'),
-      ];
-      for (const pat of phonePatterns) {
-        const matches = [...bodyText.matchAll(pat)];
-        for (const m of matches) {
-          const normalized = normalizeCandidatePhone(m?.[1] || '');
-          if (!normalized) continue;
-          existing.phone = normalized;
-          changed = true;
-          break;
-        }
-        if (existing.phone) break;
+      if (!existing.phone || !merged.includes(existing.phone)) {
+        existing.phone = merged[0];
+        changed = true;
       }
     }
   }

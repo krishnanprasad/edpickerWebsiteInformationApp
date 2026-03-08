@@ -31,10 +31,12 @@ import {
       </div>
 
       <!-- Phone -->
-      <div class="info-row fade-in" *ngIf="identity.phone">
+      <div class="info-row fade-in" *ngIf="displayPhones.length">
         <mat-icon>phone</mat-icon>
-        <span class="info-label">Phone:</span>
-        <a class="info-value info-link" [href]="'tel:' + identity.phone">{{ identity.phone }}</a>
+        <span class="info-label">{{ displayPhones.length > 1 ? 'Phones:' : 'Phone:' }}</span>
+        <span class="info-value phones-wrap">
+          <a class="info-link phone-chip" *ngFor="let ph of displayPhones" [href]="'tel:' + ph">{{ ph }}</a>
+        </span>
       </div>
 
       <!-- Email -->
@@ -90,7 +92,7 @@ import {
       </div>
 
       <div class="action-buttons">
-        <a class="action-btn" *ngIf="identity.phone" [href]="'tel:' + identity.phone">
+        <a class="action-btn" *ngIf="primaryPhone" [href]="'tel:' + primaryPhone">
           <mat-icon>phone</mat-icon> Call
         </a>
         <a class="action-btn" *ngIf="identity.email" [href]="'mailto:' + identity.email">
@@ -152,6 +154,8 @@ import {
     .info-label { color: var(--sl-text-muted, #616161); font-weight: 500; }
     .info-value { font-weight: 600; }
     .info-empty { color: #8a8a8a; font-style: italic; font-weight: 500; }
+    .phones-wrap { display: flex; flex-wrap: wrap; gap: 6px; }
+    .phone-chip { background: #f5f5f5; border-radius: 999px; padding: 2px 8px; text-decoration: none; }
     .info-link { color: #1a237e; text-decoration: none; cursor: pointer; }
     .info-link:hover { text-decoration: underline; }
 
@@ -232,6 +236,17 @@ import {
 export class SchoolIdentityComponent {
   @Input() identity: SchoolIdentity | null = null;
   @Input() overallScore = 0;
+
+  get displayPhones(): string[] {
+    if (!this.identity) return [];
+    const phones = Array.isArray(this.identity.phones) ? this.identity.phones : [];
+    const fallback = this.identity.phone ? [this.identity.phone] : [];
+    return Array.from(new Set([...(phones || []), ...fallback].filter(Boolean) as string[])).slice(0, 3);
+  }
+
+  get primaryPhone(): string | null {
+    return this.displayPhones[0] || null;
+  }
 
   get initials(): string {
     if (!this.identity?.name) return '?';

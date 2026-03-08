@@ -1,7 +1,7 @@
-import { Component, Input, Output, EventEmitter } from '@angular/core';
+﻿import { Component, Input, Output, EventEmitter } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
-import { ClarityScore } from '../models/scan.models';
+import { ClarityScore, EarlyIdentity } from '../models/scan.models';
 
 interface ClaritySection {
   id: string;
@@ -86,6 +86,8 @@ interface ClaritySection {
 })
 export class ClarityScoreComponent {
   @Input() score: ClarityScore | null = null;
+  @Input() earlyIdentity: EarlyIdentity | null = null;
+  @Input() summary: string | null = null;
   @Output() askAi = new EventEmitter<string>();
 
   onAskAi(label: string) {
@@ -124,6 +126,17 @@ export class ClarityScoreComponent {
         ],
       },
       {
+        id: 'extracurricular',
+        emoji: '🎭',
+        title: 'Extra Curricular',
+        subtitle: 'What beyond-academics activities are visible?',
+        items: [
+          { label: 'Sports / physical activities mentioned', found: this.hasExtraSignal('sports') },
+          { label: 'Clubs / student activities mentioned', found: this.hasExtraSignal('clubs') },
+          { label: 'Arts / music / cultural activities mentioned', found: this.hasExtraSignal('arts') },
+        ],
+      },
+      {
         id: 'digital',
         emoji: '🌐',
         title: 'Digital Presence & Contact',
@@ -133,5 +146,15 @@ export class ClarityScoreComponent {
         ],
       },
     ];
+  }
+
+  private hasExtraSignal(kind: 'sports' | 'clubs' | 'arts'): boolean {
+    const facilities = Array.isArray((this.earlyIdentity as any)?.facilities)
+      ? (this.earlyIdentity as any).facilities.map((f: unknown) => String(f).toLowerCase())
+      : [];
+    const text = `${this.summary || ''} ${facilities.join(' ')}`.toLowerCase();
+    if (kind === 'sports') return /sport|playground|athletic|games/.test(text);
+    if (kind === 'clubs') return /club|activity|society|student.?club|beyond academics/.test(text);
+    return /music|dance|art|cultural|drama/.test(text);
   }
 }

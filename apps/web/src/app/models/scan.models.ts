@@ -10,6 +10,7 @@ export interface SchoolIdentity {
   board: string | null;
   websiteUrl: string;
   phone: string | null;
+  phones?: string[] | null;
   email: string | null;
   address: string | null;
   principal: string | null;
@@ -102,6 +103,7 @@ export interface EarlyIdentity {
   mottoConfidence?: 'high' | 'medium' | 'low';
   socialUrls?: { facebook?: string; instagram?: string; youtube?: string; twitter?: string; linkedin?: string };
   phone?: string;
+  phones?: string[];
   email?: string;
   address?: string;
 }

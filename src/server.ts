@@ -528,7 +528,10 @@ async function upsertSchoolFromSession(params: {
     );
   }
 
-  const phones = extractPhones(identity.phone);
+  const phoneSeed = [identity.phone, ...(Array.isArray((identity as any).phones) ? (identity as any).phones : [])]
+    .filter((v) => typeof v === 'string' && String(v).trim().length > 0)
+    .join(', ');
+  const phones = extractPhones(phoneSeed);
   const emails = extractEmails(identity.email);
   const social = (identity.socialUrls && typeof identity.socialUrls === 'object')
     ? (identity.socialUrls as Record<string, unknown>)
@@ -1411,7 +1414,7 @@ app.get('/api/scan/:id', async (req, res) => {
       [sessionId],
     );
     if (docResult.rowCount) {
-      response.mandatoryDocuments = docResult.rows.map((d) => ({
+      response.mandatoryDocuments = docResult.rows.map((d: any) => ({
         code: d.document_code,
         name: d.document_name,
         status: d.status,
@@ -1421,7 +1424,7 @@ app.get('/api/scan/:id', async (req, res) => {
         reviewMessage: d.review_message,
         confidence: d.confidence,
       }));
-      const needsReviewCount = docResult.rows.filter((d) => String(d.status) === 'needs_review').length;
+      const needsReviewCount = docResult.rows.filter((d: any) => String(d.status) === 'needs_review').length;
       if (needsReviewCount > 0) {
         response.documentReviewMessage = `${needsReviewCount} mandatory document(s) need manual review.`;
       }
