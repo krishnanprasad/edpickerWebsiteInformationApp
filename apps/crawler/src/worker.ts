@@ -99,6 +99,9 @@ const crawlQueueName = process.env.CRAWLER_QUEUE_NAME || 'schoollens-crawl';
 const scoringQueueName = process.env.SCORING_QUEUE_NAME || 'schoollens-score';
 
 const PLAYWRIGHT_HARD_BUDGET = Number(process.env.PLAYWRIGHT_BUDGET ?? 5);
+const PLAYWRIGHT_ENABLED = process.env.PLAYWRIGHT_ENABLED
+  ? process.env.PLAYWRIGHT_ENABLED === '1'
+  : process.env.IS_LOCAL === '1';
 const CHEERIO_MIN_TEXT_LENGTH = 500;
 const PDF_MAX_BYTES = Number(process.env.PDF_MAX_BYTES ?? (8 * 1024 * 1024));
 const HEARTBEAT_INTERVAL_MS = 10_000;
@@ -1421,7 +1424,7 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
       
       // Check if Cheerio result is garbage (JS/CSS instead of content)
       const cheerioText = extractCleanText(homepageResult.$);
-      if ((cheerioText.length < CHEERIO_MIN_TEXT_LENGTH || isGarbageText(cheerioText)) && playwrightBudget > 0) {
+      if (PLAYWRIGHT_ENABLED && (cheerioText.length < CHEERIO_MIN_TEXT_LENGTH || isGarbageText(cheerioText)) && playwrightBudget > 0) {
         console.log(`[${sessionId.slice(0, 8)}] Homepage Cheerio got garbage (${cheerioText.length} chars), trying Playwright`);
         const pwResult = await fetchWithPlaywright(url, 20_000);
         const cheerioMod = await import('cheerio');
@@ -1432,12 +1435,16 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
       }
     } catch (err) {
       console.warn(`[${sessionId.slice(0, 8)}] Homepage Cheerio failed, trying Playwright:`, err instanceof Error ? err.message : err);
-      const pwResult = await fetchWithPlaywright(url, 20_000);
-      const cheerioMod = await import('cheerio');
-      const $ = cheerioMod.load(pwResult.html);
-      homepageResult = { html: pwResult.html, $, contentType: 'text/html', statusCode: 200 };
-      playwrightBudget--;
-      homepageUsedPlaywright = true;
+      if (PLAYWRIGHT_ENABLED && playwrightBudget > 0) {
+        const pwResult = await fetchWithPlaywright(url, 20_000);
+        const cheerioMod = await import('cheerio');
+        const $ = cheerioMod.load(pwResult.html);
+        homepageResult = { html: pwResult.html, $, contentType: 'text/html', statusCode: 200 };
+        playwrightBudget--;
+        homepageUsedPlaywright = true;
+      } else {
+        throw err;
+      }
     }
     seen.add(url);
     crawledUrlSet.add(url);
@@ -1649,7 +1656,7 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
           }
 
           // Playwright fallback for thin content OR garbage content
-          if ((pageText.length < CHEERIO_MIN_TEXT_LENGTH || isGarbageText(pageText)) && playwrightBudget > 0) {
+          if (PLAYWRIGHT_ENABLED && (pageText.length < CHEERIO_MIN_TEXT_LENGTH || isGarbageText(pageText)) && playwrightBudget > 0) {
             console.log(`[${sessionId.slice(0, 8)}] Cheerio ${pageText.length} chars (garbage: ${isGarbageText(pageText)}) → Playwright: ${pageUrl}`);
             try {
               const pwResult = await fetchWithPlaywright(pageUrl, 15_000);
@@ -1664,7 +1671,7 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
             playwrightBudget--;
           }
         } catch (fetchErr) {
-          if (playwrightBudget > 0) {
+          if (PLAYWRIGHT_ENABLED && playwrightBudget > 0) {
             try {
               const pwResult = await fetchWithPlaywright(pageUrl, 15_000);
               pageText = pwResult.text;
