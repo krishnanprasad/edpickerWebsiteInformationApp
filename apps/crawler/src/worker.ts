@@ -439,6 +439,51 @@ async function callAiJson(
   return { provider: null, result: null };
 }
 
+function hasMenuNoisePrincipalText(candidateRaw: string): boolean {
+  const candidate = (candidateRaw || '').trim();
+  if (!candidate) return true;
+  if (/(homeabout|aboutus|teachercorner|admissionenquiry|enquiryhome|contactus)/i.test(candidate)) return true;
+  const lower = candidate.toLowerCase();
+  const blockedWords = [
+    'admission', 'enquiry', 'inquiry', 'home', 'about', 'teacher', 'corner', 'menu', 'navigation',
+    'gallery', 'notice', 'news', 'event', 'campus', 'class', 'room', 'office', 'department',
+  ];
+  const tokens = lower.split(/\s+/).filter(Boolean);
+  if (tokens.length >= 2 && tokens.filter((t) => blockedWords.includes(t)).length >= 2) return true;
+  return false;
+}
+
+async function validatePrincipalNameWithAi(
+  candidateRaw: string,
+  contextText: string,
+): Promise<boolean> {
+  const candidate = (candidateRaw || '').trim();
+  if (!candidate) return false;
+  if (hasMenuNoisePrincipalText(candidate)) return false;
+
+  const prompt = `You validate whether a candidate is a real PERSON name for a school principal.
+Return strict JSON only: {"isHumanName": true|false}
+Rules:
+- true only for actual human names.
+- false for menu text, page labels, roles, departments, slogans, or mixed navigation words.
+- false if it looks like concatenated website navigation text.`;
+
+  const user = `Candidate: "${candidate}"\nContext:\n${(contextText || '').slice(0, 2500)}`;
+
+  const [openAiResult, geminiResult] = await Promise.all([
+    callOpenAiJson(prompt, user, 60).catch(() => null),
+    callGeminiJson(prompt, user, geminiModelAudit).catch(() => null),
+  ]);
+
+  const votes: boolean[] = [];
+  if (openAiResult && typeof openAiResult.isHumanName === 'boolean') votes.push(Boolean(openAiResult.isHumanName));
+  if (geminiResult && typeof geminiResult.isHumanName === 'boolean') votes.push(Boolean(geminiResult.isHumanName));
+
+  if (votes.length === 0) return true;
+  if (votes.length === 1) return votes[0];
+  return votes[0] && votes[1];
+}
+
 async function auditWithGemini(params: {
   sessionId: string;
   sourceUrl: string;
@@ -882,10 +927,11 @@ function inferBoardFromText(text: string): string | null {
 function looksLikePrincipalName(candidateRaw: string, principalBlockedPattern: string): boolean {
   const candidate = candidateRaw.trim().replace(/\s+/g, ' ');
   if (!candidate || candidate.length < 4 || candidate.length > 70) return false;
+  if (hasMenuNoisePrincipalText(candidate)) return false;
   if (/\d/.test(candidate)) return false;
   if (/[|]/.test(candidate)) return false;
-  if (/(?:auditorium|guidance|counselling|counseling|room|block|office|lab|class|department|campus)/i.test(candidate)) return false;
-  if (/\b(school|academy|vidya|mandhir|mandir|college|institute|foundation|desk|message|welcome|phone|email|address)\b/i.test(candidate)) return false;
+  if (/(?:auditorium|guidance|counselling|counseling|room|block|office|lab|class|department|campus|teacher|corner|admission|enquiry|inquiry|home|about)/i.test(candidate)) return false;
+  if (/\b(school|academy|vidya|mandhir|mandir|college|institute|foundation|desk|message|welcome|phone|email|address|menu|navigation|notice|news|event)\b/i.test(candidate)) return false;
   if (principalBlockedPattern && new RegExp(`\\b(?:${principalBlockedPattern})\\b`, 'i').test(candidate)) return false;
   const tokens = candidate.split(/\s+/).filter(Boolean);
   const tokenCount = tokens.length;
@@ -1397,6 +1443,7 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
   let pdfsFound = 0;
   let imagesFound = 0;
   let feeSource: 'html' | 'pdf' | 'secondary_html' | null = null;
+  let validatedPrincipalCandidate: string | null = null;
   const startTime = Date.now();
   const markFeeSource = (facts: CrawlFact[], source: 'html' | 'pdf' | 'secondary_html') => {
     if (feeSource) return;
@@ -1451,14 +1498,19 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
 
     // 2. Extract early identity
     const identity = extractIdentity(homepageResult.$, homepageResult.html, url);
-    if (Object.keys(identity).length > 0) {
-      post('/internal/early-identity', { sessionId, identity }).catch(() => {});
-      await emitEvent(sessionId, 'identity', identity as unknown as Record<string, unknown>);
-    }
 
     // 3. Homepage text + facts
     const homepageTitle = homepageResult.$('title').text().trim() || url;
     const homepageText = extractCleanText(homepageResult.$);
+    if (identity.principalName) {
+      const valid = await validatePrincipalNameWithAi(identity.principalName, homepageText);
+      if (valid) validatedPrincipalCandidate = identity.principalName;
+      else identity.principalName = undefined;
+    }
+    if (Object.keys(identity).length > 0) {
+      post('/internal/early-identity', { sessionId, identity }).catch(() => {});
+      await emitEvent(sessionId, 'identity', identity as unknown as Record<string, unknown>);
+    }
     pageEntries.push({ url, title: homepageTitle, text: homepageText });
     const homepageFacts = extractFacts(homepageText, url, 'homepage');
     allFacts.push(...homepageFacts);
@@ -1712,6 +1764,11 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
               innerPage$ = cheerioMod.load(`<body>${pageText}</body>`);
             }
             const refined = refineIdentity(identity, innerPage$, pageUrl);
+            if (identity.principalName && identity.principalName !== validatedPrincipalCandidate) {
+              const valid = await validatePrincipalNameWithAi(identity.principalName, `${pageText}\n${homepageText}`);
+              if (valid) validatedPrincipalCandidate = identity.principalName;
+              else identity.principalName = undefined;
+            }
             if (refined) {
               post('/internal/early-identity', { sessionId, identity }).catch(() => {});
               await emitEvent(sessionId, 'identity', identity as unknown as Record<string, unknown>);
@@ -1810,6 +1867,12 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
       ...mandatoryDocs.values(),
       ...buildMissingMandatoryDocuments(foundDocCodes, { homepageDisclosureLinkFound }),
     ].sort((a, b) => a.name.localeCompare(b.name));
+
+    if (identity.principalName) {
+      const valid = await validatePrincipalNameWithAi(identity.principalName, combinedText);
+      if (!valid) identity.principalName = undefined;
+    }
+    await post('/internal/early-identity', { sessionId, identity }).catch(() => {});
 
     // POST results
     await post('/internal/crawl-result', {

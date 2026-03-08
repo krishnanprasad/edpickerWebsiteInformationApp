@@ -289,6 +289,18 @@ function normalizeBoardFromKeywords(matchedKeywords: unknown): string | null {
   return null;
 }
 
+function looksLikeHumanPrincipalName(value: unknown): boolean {
+  const candidate = cleanText(value, 200);
+  if (!candidate) return false;
+  if (candidate.length < 5 || candidate.length > 80) return false;
+  if (/\d/.test(candidate)) return false;
+  if (/(homeabout|aboutus|teachercorner|admissionenquiry|contactus)/i.test(candidate)) return false;
+  if (/\b(admission|enquiry|inquiry|home|about|teacher|corner|menu|navigation|gallery|news|event|campus|office|department|school)\b/i.test(candidate)) return false;
+  const tokens = candidate.split(/\s+/).filter(Boolean);
+  if (tokens.length < 2 || tokens.length > 6) return false;
+  return tokens.every((token) => /^[A-Za-z.'-]+$/.test(token));
+}
+
 function parseYear(value: unknown): number | null {
   if (!value && value !== 0) return null;
   const m = String(value).match(/\b(18|19|20)\d{2}\b/);
@@ -392,7 +404,12 @@ function normalizeSchoolField(field: string, value: unknown): string | number | 
     if (!board || !BOARD_VALUES.has(board)) return null;
     return board;
   }
-  if (field === 'name' || field === 'principal_name') return cleanText(value, 200);
+  if (field === 'name') return cleanText(value, 200);
+  if (field === 'principal_name') {
+    const cleaned = cleanText(value, 200);
+    if (!cleaned) return null;
+    return looksLikeHumanPrincipalName(cleaned) ? cleaned : null;
+  }
   if (field === 'address_line1' || field === 'address_line2') return cleanText(value, 300);
   if (field === 'city' || field === 'state' || field === 'medium_of_instruction') return cleanText(value, 100);
   if (field === 'pincode') return (cleanText(value, 10) || '').match(/^\d{6}$/)?.[0] || null;
