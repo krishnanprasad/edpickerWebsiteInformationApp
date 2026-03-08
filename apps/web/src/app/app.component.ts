@@ -1317,11 +1317,12 @@ export class AppComponent implements OnInit, OnDestroy {
       phone: early.phone ? String(early.phone) : null,
       email: early.email ? String(early.email) : null,
       address: early.address ? String(early.address) : null,
-      principal: early.principalName ? String(early.principalName) : null,
+      principal: early.principalName ? String(early.principalName) : 'Not Able to Identify - Missing Data.',
       foundingYear: early.foundingYear ? String(early.foundingYear) : null,
       vision: early.vision ? String(early.vision) : null,
       mission: early.mission ? String(early.mission) : null,
       motto: early.motto ? String(early.motto) : null,
+      facilities: Array.isArray(early.facilities) ? early.facilities.map((f: unknown) => String(f)).slice(0, 8) : null,
       socialUrls: early.socialUrls ? early.socialUrls : null,
     };
   }
@@ -1661,6 +1662,10 @@ export class AppComponent implements OnInit, OnDestroy {
   getFivePoints(scan: ScanResponse | null): Array<{ icon: string; text: string; source: string }> {
     if (!scan || !this.isTerminal(scan.status)) return [];
     const points: Array<{ icon: string; text: string; source: string }> = [];
+    const ei = scan.earlyIdentity;
+
+    const uniquePoint = this.getDistinctivePoint(scan);
+    if (uniquePoint) points.push(uniquePoint);
 
     // 1. Board / curriculum
     const board = this.inferBoard(scan);
@@ -1692,7 +1697,6 @@ export class AppComponent implements OnInit, OnDestroy {
     }
 
     // 4. Contact info
-    const ei = scan.earlyIdentity;
     if (ei) {
       const contact: string[] = [];
       if (ei.phone) contact.push(`phone (${ei.phone})`);
@@ -1709,6 +1713,34 @@ export class AppComponent implements OnInit, OnDestroy {
     }
 
     return points.slice(0, 5);
+  }
+
+  private getDistinctivePoint(scan: ScanResponse): { icon: string; text: string; source: string } | null {
+    const ei = scan.earlyIdentity as any;
+    if (!ei) return null;
+    const facilities = Array.isArray(ei.facilities) ? ei.facilities.map((f: unknown) => String(f)).filter(Boolean) : [];
+    if (facilities.length > 0) {
+      return {
+        icon: '✨',
+        text: `Distinctive campus details published: ${facilities.slice(0, 3).join(', ')}.`,
+        source: 'Extracted from school website',
+      };
+    }
+    if (ei.foundingYear) {
+      return {
+        icon: '🏫',
+        text: `Established in ${ei.foundingYear} (published on school website).`,
+        source: 'Extracted from school website',
+      };
+    }
+    if (ei.principalName) {
+      return {
+        icon: '👤',
+        text: `Leadership detail available: Principal ${ei.principalName}.`,
+        source: 'Extracted from school website',
+      };
+    }
+    return null;
   }
 
   get anySlotInProgress(): boolean {
@@ -1848,11 +1880,17 @@ export class AppComponent implements OnInit, OnDestroy {
 
   private inferBoard(scan: ScanResponse): string | null {
     const keywords = (scan.classification?.matchedKeywords ?? []).map((k) => String(k).toLowerCase());
+    const combined = `${scan.url || ''} ${scan.summary || ''} ${(scan.earlyIdentity?.schoolName || '')}`.toLowerCase();
     if (keywords.some((k) => k.includes('cbse'))) return 'CBSE';
+    if (/\bcbse\b/.test(combined)) return 'CBSE';
     if (keywords.some((k) => k.includes('icse') || k.includes('isc'))) return 'ICSE';
+    if (/\bicse\b|\bisc\b/.test(combined)) return 'ICSE';
     if (keywords.some((k) => k.includes('ib') || k.includes('international baccalaureate'))) return 'IB';
+    if (/\binternational baccalaureate\b|\bib[-\s]?(pyp|myp|dp)?\b/.test(combined)) return 'IB';
     if (keywords.some((k) => k.includes('igcse') || k.includes('cambridge'))) return 'IGCSE';
+    if (/\bigcse\b|\bcambridge\b/.test(combined)) return 'IGCSE';
     if (keywords.some((k) => k.includes('state board'))) return 'State Board';
+    if (/\bstate board\b/.test(combined)) return 'State Board';
     return null;
   }
 }

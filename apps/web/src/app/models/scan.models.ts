@@ -17,6 +17,7 @@ export interface SchoolIdentity {
   vision?: string | null;
   mission?: string | null;
   motto?: string | null;
+  facilities?: string[] | null;
   socialUrls?: { facebook?: string; instagram?: string; youtube?: string; twitter?: string; linkedin?: string } | null;
 }
 
@@ -95,6 +96,7 @@ export interface EarlyIdentity {
   vision?: string;
   mission?: string;
   motto?: string;
+  facilities?: string[];
   visionConfidence?: 'high' | 'medium' | 'low';
   missionConfidence?: 'high' | 'medium' | 'low';
   mottoConfidence?: 'high' | 'medium' | 'low';

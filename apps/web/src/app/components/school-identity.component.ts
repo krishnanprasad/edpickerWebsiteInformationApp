@@ -24,10 +24,10 @@ import {
       </div>
 
       <!-- Principal -->
-      <div class="info-row fade-in" *ngIf="identity.principal">
+      <div class="info-row fade-in">
         <mat-icon>person</mat-icon>
         <span class="info-label">Principal:</span>
-        <span class="info-value">{{ identity.principal }}</span>
+        <span class="info-value" [class.info-empty]="!identity.principal || identity.principal.includes('Not Able to Identify')">{{ identity.principal || 'Not Able to Identify - Missing Data.' }}</span>
       </div>
 
       <!-- Phone -->
@@ -151,6 +151,7 @@ import {
     .info-row mat-icon { font-size: 18px; width: 18px; height: 18px; color: #1a237e; }
     .info-label { color: var(--sl-text-muted, #616161); font-weight: 500; }
     .info-value { font-weight: 600; }
+    .info-empty { color: #8a8a8a; font-style: italic; font-weight: 500; }
     .info-link { color: #1a237e; text-decoration: none; cursor: pointer; }
     .info-link:hover { text-decoration: underline; }
 

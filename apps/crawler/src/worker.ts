@@ -464,7 +464,7 @@ async function classifyUrl(url: string): Promise<{
     }
   }
 
-  const combined = `${pageTitle} ${metaDescription} ${bodyText} ${hrefText}`.toLowerCase();
+  const combined = `${url} ${pageTitle} ${metaDescription} ${bodyText} ${hrefText}`.toLowerCase();
   const matched = EDUCATION_KEYWORDS.filter((kw) => combined.includes(kw));
 
   const matchedCats = EDUCATION_CATEGORIES.filter((cat) => cat.terms.some((t) => matched.includes(t)));
@@ -474,10 +474,12 @@ async function classifyUrl(url: string): Promise<{
 
   const hasCoreInstitution = ['school', 'academy', 'institute', 'college', 'university', 'vidyalaya', 'convent'].some((t) => matched.includes(t));
   const hasBoardTerm = ['cbse', 'icse', 'matric', 'cambridge', 'igcse', 'international baccalaureate', 'ib '].some((t) => matched.includes(t));
-  const isEducational = (hasCoreInstitution && hasBoardTerm && matched.length >= 5) || confidence >= EDUCATION_CONFIDENCE_THRESHOLD;
+  const hasInstitutionPlusAcademic = hasCoreInstitution && ['admission', 'admissions', 'curriculum', 'academic', 'students', 'teacher'].some((t) => matched.includes(t));
+  const strongInstitutionEvidence = (hasCoreInstitution && hasBoardTerm && matched.length >= 3) || hasInstitutionPlusAcademic;
+  const isEducational = strongInstitutionEvidence || confidence >= EDUCATION_CONFIDENCE_THRESHOLD;
 
   const missingIndicators: string[] = [];
-  if (!['school', 'academy', 'institute', 'college', 'university'].some((t) => matched.includes(t))) missingIndicators.push('Institution identity');
+  if (!['school', 'academy', 'institute', 'college', 'university', 'vidyalaya', 'convent'].some((t) => matched.includes(t))) missingIndicators.push('Institution identity');
   if (!['cbse', 'icse', 'matric', 'cambridge', 'igcse', 'international baccalaureate', 'ib '].some((t) => matched.includes(t))) missingIndicators.push('Board affiliation');
   if (!matched.includes('admissions') && !matched.includes('enrollment') && !matched.includes('admission') && !matched.includes('enrolment')) missingIndicators.push('Admissions info');
   if (!matched.includes('curriculum') && !matched.includes('syllabus') && !matched.includes('academic')) missingIndicators.push('Academic details');
@@ -585,6 +587,7 @@ interface EarlyIdentity {
   vision?: string;
   mission?: string;
   motto?: string;
+  facilities?: string[];
   visionConfidence?: 'high' | 'medium' | 'low';
   missionConfidence?: 'high' | 'medium' | 'low';
   mottoConfidence?: 'high' | 'medium' | 'low';
@@ -592,6 +595,126 @@ interface EarlyIdentity {
   phone?: string;
   email?: string;
   address?: string;
+}
+
+const EMAIL_VENDOR_BLOCKLIST = ['falar.com', 'wix.com', 'wordpress.com', 'squarespace.com', 'godaddy.com', 'hostinger.com'];
+
+const FACILITY_PATTERNS: Array<{ label: string; rx: RegExp }> = [
+  { label: 'Transport', rx: /\b(transport|school bus|bus facility|bus service|gps[-\s]?enabled bus)\b/i },
+  { label: 'Library', rx: /\b(library|reading room)\b/i },
+  { label: 'Labs', rx: /\b(lab(oratory)?|science lab|computer lab|language lab|physics lab|chemistry lab|biology lab)\b/i },
+  { label: 'Sports', rx: /\b(sports?|playground|indoor games|outdoor games|athletics|sports complex)\b/i },
+  { label: 'Hostel', rx: /\b(hostel|boarding facility|residential campus)\b/i },
+  { label: 'CCTV', rx: /\b(cctv|surveillance camera|security camera)\b/i },
+  { label: 'Medical Room', rx: /\b(medical room|infirmary|school nurse|doctor on campus|first aid room)\b/i },
+  { label: 'Smart Classrooms', rx: /\b(smart class(room)?|digital class(room)?|smart board)\b/i },
+];
+
+function getBaseDomain(hostname: string): string {
+  const host = hostname.toLowerCase().replace(/^www\./, '').trim();
+  const parts = host.split('.').filter(Boolean);
+  if (parts.length <= 2) return host;
+  return parts.slice(-2).join('.');
+}
+
+function scoreEmailCandidate(email: string, context: string, pageUrl: string, isMailto: boolean): number {
+  const normalized = email.trim().toLowerCase();
+  if (!/^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$/i.test(normalized)) return -999;
+  const [local = '', domain = ''] = normalized.split('@');
+  const domainLower = domain.toLowerCase();
+  const ctx = context.toLowerCase();
+  let score = 0;
+
+  try {
+    const pageHost = new URL(pageUrl).hostname;
+    const pageBase = getBaseDomain(pageHost);
+    const emailBase = getBaseDomain(domainLower);
+    if (emailBase === pageBase) score += 45;
+    else if (domainLower.includes(pageBase.replace(/\.[a-z]+$/, ''))) score += 20;
+  } catch {
+    // Ignore URL parse errors.
+  }
+
+  if (isMailto) score += 10;
+  if (/\b(contact|admission|principal|office|school|enquiry|inquiry|info)\b/i.test(local)) score += 18;
+  if (/\b(contact|admission|principal|office|email|mail|reach)\b/i.test(ctx)) score += 16;
+  if (/\b(no-?reply|noreply|donotreply)\b/i.test(local)) score -= 20;
+  if (/\b(hello|support|help)\b/i.test(local) && !/\b(school|academy|vidyalaya|college|institute)\b/i.test(domainLower)) score -= 15;
+  if (EMAIL_VENDOR_BLOCKLIST.some((v) => domainLower.endsWith(v))) score -= 40;
+  if (/\.(png|jpg|jpeg|gif|svg|css|js)$/i.test(normalized)) score -= 30;
+
+  return score;
+}
+
+function extractBestEmail($: import('cheerio').CheerioAPI, bodyText: string, pageUrl: string): string | null {
+  const candidates = new Map<string, number>();
+  const update = (email: string, context: string, isMailto: boolean) => {
+    const normalized = email.trim().toLowerCase();
+    const score = scoreEmailCandidate(normalized, context, pageUrl, isMailto);
+    if (score < -100) return;
+    const prev = candidates.get(normalized);
+    if (prev === undefined || score > prev) candidates.set(normalized, score);
+  };
+
+  $('a[href^="mailto:"]').each((_, el) => {
+    const href = ($(el).attr('href') || '').replace(/^mailto:/i, '').split('?')[0].trim();
+    if (!href) return;
+    update(href, `${$(el).text()} ${$(el).parent().text()}`, true);
+  });
+
+  const emailRegex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,6}/g;
+  for (const match of bodyText.matchAll(emailRegex)) {
+    const email = match[0];
+    const idx = match.index ?? 0;
+    const start = Math.max(0, idx - 80);
+    const end = Math.min(bodyText.length, idx + email.length + 80);
+    update(email, bodyText.slice(start, end), false);
+  }
+
+  if (candidates.size === 0) return null;
+  return [...candidates.entries()].sort((a, b) => b[1] - a[1])[0][0];
+}
+
+function chooseBetterEmail(currentEmail: string | undefined, candidateEmail: string | null, pageUrl: string): string | undefined {
+  if (!candidateEmail) return currentEmail;
+  if (!currentEmail) return candidateEmail;
+  const currentScore = scoreEmailCandidate(currentEmail, '', pageUrl, false);
+  const candidateScore = scoreEmailCandidate(candidateEmail, '', pageUrl, false);
+  if (candidateScore >= currentScore + 6) return candidateEmail;
+  return currentEmail;
+}
+
+function extractFacilitiesFromText(text: string): string[] {
+  const facilities: string[] = [];
+  const cleaned = (text || '').replace(/\s+/g, ' ').trim();
+  if (!cleaned) return facilities;
+  for (const item of FACILITY_PATTERNS) {
+    if (item.rx.test(cleaned)) facilities.push(item.label);
+  }
+  return facilities.slice(0, 8);
+}
+
+function inferBoardFromText(text: string): string | null {
+  const lower = text.toLowerCase();
+  if (/\bcbse\b/.test(lower)) return 'CBSE';
+  if (/\bicse\b|\bisc\b/.test(lower)) return 'ICSE';
+  if (/\bigcse\b|\bcambridge\b/.test(lower)) return 'IGCSE';
+  if (/\binternational baccalaureate\b|\bib[-\s]?(pyp|myp|dp)?\b/.test(lower)) return 'IB';
+  if (/\bstate board\b/.test(lower)) return 'State Board';
+  return null;
+}
+
+function looksLikePrincipalName(candidateRaw: string, principalBlockedPattern: string): boolean {
+  const candidate = candidateRaw.trim().replace(/\s+/g, ' ');
+  if (!candidate || candidate.length < 4 || candidate.length > 70) return false;
+  if (/\d/.test(candidate)) return false;
+  if (/[|]/.test(candidate)) return false;
+  if (/(?:auditorium|guidance|counselling|counseling|room|block|office|lab|class|department|campus)/i.test(candidate)) return false;
+  if (/\b(school|academy|vidya|mandhir|mandir|college|institute|foundation|desk|message|welcome|phone|email|address)\b/i.test(candidate)) return false;
+  if (principalBlockedPattern && new RegExp(`\\b(?:${principalBlockedPattern})\\b`, 'i').test(candidate)) return false;
+  const tokenCount = candidate.split(/\s+/).length;
+  if (tokenCount > 6) return false;
+  return /^[A-Za-z.\s'-]+$/.test(candidate);
 }
 
 function extractIdentity($: import('cheerio').CheerioAPI, _html: string, _url: string): EarlyIdentity {
@@ -730,11 +853,7 @@ function extractIdentity($: import('cheerio').CheerioAPI, _html: string, _url: s
     const m = bodyText.match(pat);
     if (m?.[1]) {
       const candidateName = m[1].trim().replace(/\s+/g, ' ');
-      // Reject if the "name" is clearly a school/org name (contains school indicators)
-      if (
-        !/\b(school|academy|vidya|mandhir|mandir|college|institute|foundation)\b/i.test(candidateName)
-        && (!principalBlockedPattern || !new RegExp(`\\b(?:${principalBlockedPattern})\\b`, 'i').test(candidateName))
-      ) {
+      if (looksLikePrincipalName(candidateName, principalBlockedPattern)) {
         identity.principalName = candidateName.slice(0, 80);
         break;
       }
@@ -753,8 +872,7 @@ function extractIdentity($: import('cheerio').CheerioAPI, _html: string, _url: s
       const m = bodyText.match(pat);
       if (m?.[1]) {
         const candidateName = m[1].trim().replace(/\s+/g, ' ');
-        if (candidateName.length >= 4 && candidateName.length <= 60
-            && !/\b(school|academy|vidya|mandhir|mandir|college|institute|foundation|desk|message|welcome)\b/i.test(candidateName)) {
+        if (looksLikePrincipalName(candidateName, principalBlockedPattern)) {
           identity.principalName = candidateName.slice(0, 80);
           break;
         }
@@ -772,12 +890,10 @@ function extractIdentity($: import('cheerio').CheerioAPI, _html: string, _url: s
         const prev = $(el).prev('h1, h2, h3, h4, h5, strong, b, p').text().trim().replace(/\s+/g, ' ');
         const next = $(el).next('h1, h2, h3, h4, h5, strong, b, p').text().trim().replace(/\s+/g, ' ');
         for (const candidate of [prev, next]) {
-          if (!candidate || candidate.length < 3 || candidate.length > 60) continue;
-          if (/\b(school|academy|vidya|college|institute|foundation|desk|message|welcome|phone|email|address)\b/i.test(candidate)) continue;
-          if (principalBlockedPattern && new RegExp(`\\b(?:${principalBlockedPattern})\\b`, 'i').test(candidate)) continue;
-          // Must look like a name: capitalized words, no long sentences
-          if (/^[A-Z][A-Za-z.]+(?:\\s+[A-Z][A-Za-z.]*){0,4},?$/.test(candidate.replace(/,\s*$/, ''))) {
-            identity.principalName = candidate.replace(/,\s*$/, '').slice(0, 80);
+          if (!candidate) continue;
+          const normalizedCandidate = candidate.replace(/,\s*$/, '').trim();
+          if (looksLikePrincipalName(normalizedCandidate, principalBlockedPattern)) {
+            identity.principalName = normalizedCandidate.slice(0, 80);
             return;
           }
         }
@@ -825,27 +941,8 @@ function extractIdentity($: import('cheerio').CheerioAPI, _html: string, _url: s
       if (identity.phone) break;
     }
   }
-
-  /* -- Email extraction -- */
-  // First: mailto: links
-  const mailtoLink = $('a[href^="mailto:"]').first().attr('href');
-  if (mailtoLink) {
-    const addr = mailtoLink.replace('mailto:', '').split('?')[0].trim();
-    if (addr.includes('@')) identity.email = addr;
-  }
-  if (!identity.email) {
-    // Match email followed by word boundary to avoid capturing trailing text like "school"
-    const emailMatch = bodyText.match(/(?:email|e-mail|mail\s*(?:us)?)\s*[:.\-–]?\s*([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,6})(?=[^a-zA-Z]|$)/i);
-    if (emailMatch?.[1]) {
-      identity.email = emailMatch[1].trim();
-    } else {
-      // Fallback: any email-like string with word boundary
-      const anyEmail = bodyText.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,6}(?=[^a-zA-Z]|$)/);
-      if (anyEmail?.[0] && !/\.(png|jpg|gif|svg|css|js)$/i.test(anyEmail[0])) {
-        identity.email = anyEmail[0];
-      }
-    }
-  }
+  /* -- Email extraction (ranked) -- */
+  identity.email = chooseBetterEmail(identity.email, extractBestEmail($, bodyText, _url), _url);
 
   /* -- Address extraction -- */
   // Try <address> HTML tag first
@@ -920,6 +1017,9 @@ function extractIdentity($: import('cheerio').CheerioAPI, _html: string, _url: s
     identity.mottoConfidence = vmData.motto.confidence;
   }
 
+  const facilities = extractFacilitiesFromText(bodyText);
+  if (facilities.length > 0) identity.facilities = facilities;
+
   return identity;
 }
 
@@ -952,10 +1052,7 @@ function refineIdentity(existing: EarlyIdentity, $: import('cheerio').CheerioAPI
       const m = bodyText.match(pat);
       if (m?.[1]) {
         const candidateName = m[1].trim().replace(/\s+/g, ' ');
-        if (
-        !/\b(school|academy|vidya|mandhir|mandir|college|institute|foundation)\b/i.test(candidateName)
-        && (!principalBlockedPattern || !new RegExp(`\\b(?:${principalBlockedPattern})\\b`, 'i').test(candidateName))
-      ) {
+        if (looksLikePrincipalName(candidateName, principalBlockedPattern)) {
           existing.principalName = candidateName.slice(0, 80);
           changed = true;
           break;
@@ -972,8 +1069,7 @@ function refineIdentity(existing: EarlyIdentity, $: import('cheerio').CheerioAPI
         const m = bodyText.match(pat);
         if (m?.[1]) {
           const candidateName = m[1].trim().replace(/\s+/g, ' ');
-          if (candidateName.length >= 4 && candidateName.length <= 60
-              && !/\b(school|academy|vidya|mandhir|mandir|college|institute|foundation|desk|message|welcome)\b/i.test(candidateName)) {
+          if (looksLikePrincipalName(candidateName, principalBlockedPattern)) {
             existing.principalName = candidateName.slice(0, 80);
             changed = true;
             break;
@@ -990,11 +1086,10 @@ function refineIdentity(existing: EarlyIdentity, $: import('cheerio').CheerioAPI
           const prev = $(el).prev('h1, h2, h3, h4, h5, strong, b, p').text().trim().replace(/\s+/g, ' ');
           const next = $(el).next('h1, h2, h3, h4, h5, strong, b, p').text().trim().replace(/\s+/g, ' ');
           for (const candidate of [prev, next]) {
-            if (!candidate || candidate.length < 3 || candidate.length > 60) continue;
-            if (/\b(school|academy|vidya|college|institute|foundation|desk|message|welcome|phone|email|address)\b/i.test(candidate)) continue;
-          if (principalBlockedPattern && new RegExp(`\\b(?:${principalBlockedPattern})\\b`, 'i').test(candidate)) continue;
-            if (/^[A-Z][A-Za-z.]+(?:\\s+[A-Z][A-Za-z.]*){0,4},?$/.test(candidate.replace(/,\s*$/, ''))) {
-              existing.principalName = candidate.replace(/,\s*$/, '').slice(0, 80);
+            if (!candidate) continue;
+            const normalizedCandidate = candidate.replace(/,\s*$/, '').trim();
+            if (looksLikePrincipalName(normalizedCandidate, principalBlockedPattern)) {
+              existing.principalName = normalizedCandidate.slice(0, 80);
               changed = true;
               return;
             }
@@ -1048,24 +1143,12 @@ function refineIdentity(existing: EarlyIdentity, $: import('cheerio').CheerioAPI
       }
     }
   }
-
-  /* -- Email from contact/about pages -- */
-  if (!existing.email) {
-    const mailtoLink = $('a[href^="mailto:"]').first().attr('href');
-    if (mailtoLink) {
-      const addr = mailtoLink.replace('mailto:', '').split('?')[0].trim();
-      if (addr.includes('@')) { existing.email = addr; changed = true; }
-    }
-    if (!existing.email) {
-      const emailMatch = bodyText.match(/(?:email|e-mail|mail\s*(?:us)?)\s*[:.\-–]?\s*([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/i);
-      if (emailMatch?.[1]) { existing.email = emailMatch[1].trim(); changed = true; }
-      else {
-        const anyEmail = bodyText.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
-        if (anyEmail?.[0] && !/\.(png|jpg|gif|svg|css|js)$/i.test(anyEmail[0])) {
-          existing.email = anyEmail[0]; changed = true;
-        }
-      }
-    }
+  /* -- Email from contact/about pages (ranked replacement allowed) -- */
+  const bestEmail = extractBestEmail($, bodyText, pageUrl);
+  const updatedEmail = chooseBetterEmail(existing.email, bestEmail, pageUrl);
+  if (updatedEmail && updatedEmail !== existing.email) {
+    existing.email = updatedEmail;
+    changed = true;
   }
 
   /* -- Address from contact/about pages -- */
@@ -1125,6 +1208,15 @@ function refineIdentity(existing: EarlyIdentity, $: import('cheerio').CheerioAPI
     existing.motto = vmData.motto.value;
     existing.mottoConfidence = vmData.motto.confidence;
     changed = true;
+  }
+
+  const facilities = extractFacilitiesFromText(bodyText);
+  if (facilities.length > 0) {
+    const merged = Array.from(new Set([...(existing.facilities || []), ...facilities])).slice(0, 8);
+    if (JSON.stringify(merged) !== JSON.stringify(existing.facilities || [])) {
+      existing.facilities = merged;
+      changed = true;
+    }
   }
 
   return changed;
@@ -1473,7 +1565,7 @@ async function crawlV2(sessionId: string, url: string, maxPages: number): Promis
         allFacts.push(...pageFacts);
 
         // Refine identity from inner pages (contact, about, principal, etc.)
-        if (/\b(contact|about|principal|headmaster|headmistress|director|staff|faculty|address|reach)\b/i.test(pageUrl)) {
+        if (/\b(contact|about|principal|headmaster|headmistress|director|staff|faculty|address|reach|vision|mission|motto)\b/i.test(pageUrl)) {
           try {
             const cheerioMod = await import('cheerio');
             // Re-fetch page for Cheerio API if we used Playwright, else reconstruct
@@ -1745,9 +1837,11 @@ const scoringWorker = new Worker(
     const clarityScore = computeClarityScore(clarity);
     const overallScore = Math.round((safetyScore.total + clarityScore.total) / 2);
 
-    // Build a meaningful summary using the actual extracted signals
+    // Build a parent-useful summary from extracted signals.
     const foundSafety = [safety.fire_certificate, safety.sanitary_certificate, safety.cctv_mention, safety.transport_safety, safety.anti_bullying_policy].filter(v => v === 'found');
     const missingSafety = [safety.fire_certificate, safety.sanitary_certificate, safety.cctv_mention, safety.transport_safety, safety.anti_bullying_policy].filter(v => v === 'missing');
+    const board = inferBoardFromText(text);
+    const facilities = extractFacilitiesFromText(text);
     const clarityItems: string[] = [];
     if (clarity.admission_dates_visible) clarityItems.push('admission dates');
     if (clarity.fee_clarity) clarityItems.push('fee structure');
@@ -1755,14 +1849,18 @@ const scoringWorker = new Worker(
     if (clarity.contact_and_map) clarityItems.push('contact details');
     if (clarity.results_published) clarityItems.push('exam results');
 
+    const boardPhrase = board ? `${board} affiliation indicators are visible` : 'board affiliation is not clearly visible';
+    const facilitiesPhrase = facilities.length > 0
+      ? `Key facilities mentioned: ${facilities.slice(0, 3).join(', ')}`
+      : 'Key facilities are not clearly listed';
     let summary: string;
     if (overallScore >= 70) {
-      summary = `This school's website is well-prepared for parents. ${clarityItems.length > 0 ? `Key information available: ${clarityItems.join(', ')}.` : ''} ${foundSafety.length >= 3 ? 'Safety disclosures are clearly documented.' : ''}`.trim();
+      summary = `Website readiness is strong for parents: ${boardPhrase}. ${clarityItems.length > 0 ? `Published details include ${clarityItems.join(', ')}.` : ''} ${facilitiesPhrase}. ${foundSafety.length >= 3 ? 'Safety disclosures are clearly documented.' : ''}`.trim();
     } else if (overallScore >= 40) {
       const missingClarity = ['admission dates', 'fee structure', 'academic calendar', 'contact details', 'exam results'].filter(i => !clarityItems.includes(i));
-      summary = `Some parent-facing details are present${clarityItems.length > 0 ? ` (${clarityItems.join(', ')})` : ''}, but key information is missing: ${missingClarity.slice(0, 3).join(', ')}. ${missingSafety.length >= 3 ? 'Safety certifications are not clearly documented.' : ''}`.trim();
+      summary = `Some parent-facing details are present${clarityItems.length > 0 ? ` (${clarityItems.join(', ')})` : ''}; however, major gaps remain in ${missingClarity.slice(0, 3).join(', ')}. ${boardPhrase}. ${facilitiesPhrase}. ${missingSafety.length >= 3 ? 'Safety certifications are not clearly documented.' : ''}`.trim();
     } else {
-      summary = `Important parent-facing details are missing. ${missingSafety.length > 0 ? 'Safety documentation (fire NOC, CCTV, anti-bullying policy) is not clearly mentioned. ' : ''}${clarityItems.length === 0 ? 'Admission, fee, and contact information are not clearly published.' : `Only ${clarityItems.join(', ')} ${clarityItems.length === 1 ? 'is' : 'are'} documented.`}`.trim();
+      summary = `Important parent-facing details are missing. ${missingSafety.length > 0 ? 'Safety documentation (fire NOC, CCTV, anti-bullying policy) is not clearly mentioned. ' : ''}${clarityItems.length === 0 ? 'Admission, fee, and contact information are not clearly published.' : `Only ${clarityItems.join(', ')} ${clarityItems.length === 1 ? 'is' : 'are'} documented.`} ${boardPhrase}. ${facilitiesPhrase}.`.trim();
     }
 
     await emitEvent(sessionId, 'final_score', { safety: safetyScore.total, clarity: clarityScore.total, overall: overallScore });
