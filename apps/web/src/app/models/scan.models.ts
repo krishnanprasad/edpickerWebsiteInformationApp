@@ -20,6 +20,23 @@ export interface SchoolIdentity {
   motto?: string | null;
   facilities?: string[] | null;
   socialUrls?: { facebook?: string; instagram?: string; youtube?: string; twitter?: string; linkedin?: string } | null;
+  externalSignals?: {
+    places?: {
+      placeId?: string | null;
+      name?: string | null;
+      address?: string | null;
+      rating?: number | null;
+      totalReviews?: number | null;
+      mapsUrl?: string | null;
+      reviews?: Array<{ author?: string | null; rating?: number | null; text?: string | null; relativeTime?: string | null }>;
+    } | null;
+    youtube?: {
+      embedUrl?: string | null;
+      watchUrl?: string | null;
+      title?: string | null;
+      publishedAt?: string | null;
+    } | null;
+  } | null;
 }
 
 export interface ParentQuestion {
@@ -145,6 +162,23 @@ export interface ScanResponse {
   summary?: string;
   safetyScore?: SafetyScore;
   clarityScore?: ClarityScore;
+  externalSignals?: {
+    places?: {
+      placeId?: string | null;
+      name?: string | null;
+      address?: string | null;
+      rating?: number | null;
+      totalReviews?: number | null;
+      mapsUrl?: string | null;
+      reviews?: Array<{ author?: string | null; rating?: number | null; text?: string | null; relativeTime?: string | null }>;
+    } | null;
+    youtube?: {
+      embedUrl?: string | null;
+      watchUrl?: string | null;
+      title?: string | null;
+      publishedAt?: string | null;
+    } | null;
+  } | null;
 
   // Scan submit response extras
   cached?: boolean;

@@ -117,6 +117,10 @@ nx graph              # Dependency graph
 | GET | `/api/scan/:id/school-info-core` | 10-category School Information Core score (0-5 each; strict missing-first; rendered as 100-point report; OpenAI with Gemini fallback) |
 | GET | `/api/schools/search?q=...` | Public autocomplete for already crawled schools (`crawl_status` in `analysed`,`partial`) |
 
+`GET /api/scan/:id` now also includes optional `externalSignals` when configured:
+- `externalSignals.places`: Google Places rating + review snapshot (uses `GOOGLE_PLACES_API_KEY`)
+- `externalSignals.youtube`: YouTube embed/watch URL for latest video (uses `YOUTUBE_API_KEY`)
+
 ### Internal (worker callbacks)
 | Method | Path | Description |
 |--------|------|-------------|

@@ -1337,6 +1337,7 @@ export class AppComponent implements OnInit, OnDestroy {
       motto: early.motto ? String(early.motto) : null,
       facilities: Array.isArray(early.facilities) ? early.facilities.map((f: unknown) => String(f)).slice(0, 8) : null,
       socialUrls: early.socialUrls ? early.socialUrls : null,
+      externalSignals: scan.externalSignals || null,
     };
   }
 

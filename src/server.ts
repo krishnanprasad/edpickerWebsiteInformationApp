@@ -496,6 +496,215 @@ function normalizeSocialUrl(url: unknown, allowedHosts: string[]): string | null
   }
 }
 
+function extractYoutubeVideoId(input: string | null | undefined): string | null {
+  if (!input) return null;
+  try {
+    const url = new URL(input);
+    const host = url.hostname.toLowerCase();
+    if (host.includes('youtu.be')) {
+      const id = url.pathname.split('/').filter(Boolean)[0] || null;
+      return id && /^[A-Za-z0-9_-]{8,20}$/.test(id) ? id : null;
+    }
+    if (host.includes('youtube.com')) {
+      const v = url.searchParams.get('v');
+      if (v && /^[A-Za-z0-9_-]{8,20}$/.test(v)) return v;
+      const seg = url.pathname.split('/').filter(Boolean);
+      const embedded = seg[0] === 'embed' ? seg[1] : null;
+      if (embedded && /^[A-Za-z0-9_-]{8,20}$/.test(embedded)) return embedded;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+async function verifyAndCorrectIdentityWithOpenAiOnce(sessionId: string): Promise<void> {
+  if (!process.env.OPENAI_API_KEY) return;
+  try {
+    const currentRes = await pgPool.query<{ early_identity: unknown; url: string }>(
+      `SELECT early_identity, url FROM analysis_sessions WHERE id = $1`,
+      [sessionId],
+    );
+    if (!currentRes.rowCount) return;
+    const early = (currentRes.rows[0].early_identity && typeof currentRes.rows[0].early_identity === 'object')
+      ? { ...(currentRes.rows[0].early_identity as Record<string, unknown>) }
+      : {};
+
+    const existingPrincipal = cleanText((early as any).principalName, 120);
+    const existingEmail = extractEmails((early as any).email)[0] || null;
+
+    const pageRes = await pgPool.query<{ extracted_text: string | null }>(
+      `SELECT extracted_text FROM crawled_pages WHERE session_id = $1 ORDER BY fetched_at ASC LIMIT 4`,
+      [sessionId],
+    );
+    const contextText = pageRes.rows.map((r) => r.extracted_text || '').join('\n').slice(0, 12000);
+    const sourceUrl = cleanText(currentRes.rows[0].url, 500) || '';
+
+    const prompt = [
+      'You are validating school contact identity fields from website crawl text.',
+      'Return JSON only with keys: principalName, email, shouldUpdate, reason.',
+      'Rules:',
+      '- principalName must be a real person name, not menu labels, rooms, departments, or concatenated nav text.',
+      '- email must be a real school contact email from website text.',
+      '- If current values are wrong/noisy, provide corrected value from context.',
+      '- If uncertain, return null for that field and shouldUpdate=false.',
+    ].join('\n');
+    const user = JSON.stringify({
+      current: { principalName: existingPrincipal, email: existingEmail },
+      sourceUrl,
+      contextText,
+    });
+
+    const ai = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: prompt },
+        { role: 'user', content: user },
+      ],
+      max_tokens: 250,
+    });
+    const parsed = parseJsonObjectFromText(ai.choices?.[0]?.message?.content || '');
+    if (!parsed) return;
+
+    const principalCandidate = cleanText(parsed.principalName, 120);
+    const emailCandidate = extractEmails(parsed.email)[0] || null;
+    const principalFinal = principalCandidate && looksLikeHumanPrincipalName(principalCandidate) ? principalCandidate : null;
+    const emailFinal = emailCandidate || null;
+
+    const nextEarly: Record<string, unknown> = { ...early };
+    let changed = false;
+
+    if (principalFinal && principalFinal !== existingPrincipal) {
+      nextEarly.principalName = principalFinal;
+      changed = true;
+    }
+    if (emailFinal && emailFinal !== existingEmail) {
+      nextEarly.email = emailFinal;
+      changed = true;
+    }
+    if (!changed) return;
+
+    await pgPool.query(
+      `UPDATE analysis_sessions SET early_identity = $2 WHERE id = $1`,
+      [sessionId, JSON.stringify(nextEarly)],
+    );
+  } catch (error) {
+    console.error('[identity-verify] failed', { sessionId, error });
+  }
+}
+
+async function fetchGooglePlacesSnapshot(query: string): Promise<Record<string, unknown> | null> {
+  const key = process.env.GOOGLE_PLACES_API_KEY;
+  if (!key || !query) return null;
+  try {
+    const searchRes = await axios.post(
+      'https://places.googleapis.com/v1/places:searchText',
+      { textQuery: query, maxResultCount: 1 },
+      {
+        timeout: 15_000,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': key,
+          'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.googleMapsUri',
+        },
+      },
+    );
+    const place = searchRes.data?.places?.[0];
+    const placeId = cleanText(place?.id, 200);
+    if (!placeId) return null;
+
+    const detailRes = await axios.get(`https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}`, {
+      timeout: 15_000,
+      headers: {
+        'X-Goog-Api-Key': key,
+        'X-Goog-FieldMask': 'id,displayName,formattedAddress,rating,userRatingCount,googleMapsUri,reviews',
+      },
+    });
+    const d = detailRes.data || {};
+    const reviews = Array.isArray(d.reviews) ? d.reviews.slice(0, 5).map((r: any) => ({
+      author: cleanText(r?.authorAttribution?.displayName, 120),
+      rating: Number(r?.rating || 0),
+      text: cleanText(r?.text?.text || r?.originalText?.text, 500),
+      relativeTime: cleanText(r?.relativePublishTimeDescription, 120),
+    })) : [];
+    return {
+      placeId: cleanText(d.id, 200),
+      name: cleanText(d?.displayName?.text, 200),
+      address: cleanText(d.formattedAddress, 400),
+      rating: Number(d.rating || 0),
+      totalReviews: Number(d.userRatingCount || 0),
+      mapsUrl: cleanText(d.googleMapsUri, 500),
+      reviews,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchYoutubeEmbedSnapshot(youtubeUrl: string | null, fallbackQuery: string): Promise<Record<string, unknown> | null> {
+  const key = process.env.YOUTUBE_API_KEY;
+  if (!key) return null;
+
+  const directVideoId = extractYoutubeVideoId(youtubeUrl);
+  if (directVideoId) {
+    return {
+      embedUrl: `https://www.youtube.com/embed/${directVideoId}`,
+      watchUrl: `https://www.youtube.com/watch?v=${directVideoId}`,
+    };
+  }
+
+  if (!youtubeUrl && !fallbackQuery) return null;
+  try {
+    const q = encodeURIComponent(fallbackQuery || youtubeUrl || '');
+    const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=1&order=date&q=${q}&key=${encodeURIComponent(key)}`;
+    const searchRes = await axios.get(searchUrl, { timeout: 15_000 });
+    const first = searchRes.data?.items?.[0];
+    const videoId = cleanText(first?.id?.videoId, 60);
+    if (!videoId) return null;
+    return {
+      embedUrl: `https://www.youtube.com/embed/${videoId}`,
+      watchUrl: `https://www.youtube.com/watch?v=${videoId}`,
+      title: cleanText(first?.snippet?.title, 200),
+      publishedAt: cleanText(first?.snippet?.publishedAt, 60),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function getExternalSignalsCached(params: {
+  sessionUrl: string;
+  schoolName: string;
+  address: string | null;
+  youtubeUrl: string | null;
+}): Promise<Record<string, unknown>> {
+  const host = normalizeWebsiteDomain(params.sessionUrl) || params.schoolName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  const key = `scan:signals:v1:${host}`;
+  const cached = await redis.get(key);
+  if (cached) {
+    try {
+      const parsed = JSON.parse(cached);
+      if (parsed && typeof parsed === 'object') return parsed as Record<string, unknown>;
+    } catch {
+      // ignore cache parse issues
+    }
+  }
+
+  const placeQuery = `${params.schoolName}${params.address ? ` ${params.address}` : ''}`.trim();
+  const [places, youtube] = await Promise.all([
+    fetchGooglePlacesSnapshot(placeQuery),
+    fetchYoutubeEmbedSnapshot(params.youtubeUrl, params.schoolName),
+  ]);
+  const payload: Record<string, unknown> = {
+    places: places || null,
+    youtube: youtube || null,
+  };
+  await redis.set(key, JSON.stringify(payload), 'EX', 6 * 60 * 60);
+  return payload;
+}
+
 function slugify(input: string): string {
   return input
     .toLowerCase()
@@ -1869,6 +2078,23 @@ app.get('/api/scan/:id', async (req, res) => {
         },
       };
     }
+
+    try {
+      const early = (response.earlyIdentity && typeof response.earlyIdentity === 'object')
+        ? (response.earlyIdentity as Record<string, unknown>)
+        : {};
+      const schoolName = cleanText((early as any).schoolName, 200) || safeHostnameLabel(String(session.url || 'school'));
+      const address = cleanText((early as any).address, 400);
+      const youtubeUrl = cleanText((early as any)?.socialUrls?.youtube, 500);
+      response.externalSignals = await getExternalSignalsCached({
+        sessionUrl: String(session.url || ''),
+        schoolName,
+        address,
+        youtubeUrl,
+      });
+    } catch {
+      response.externalSignals = { places: null, youtube: null };
+    }
   }
 
   return res.json(response);
@@ -2166,6 +2392,8 @@ app.post('/internal/score-complete', async (req, res) => {
       clarityScore.fee_source ?? null,
     ],
   );
+
+  await verifyAndCorrectIdentityWithOpenAiOnce(sessionId);
 
   try {
     await upsertSchoolFromSession({

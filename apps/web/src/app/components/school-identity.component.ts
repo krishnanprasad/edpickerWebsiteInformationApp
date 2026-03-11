@@ -1,6 +1,7 @@
 import { Component, Input } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
+import { DomSanitizer, SafeResourceUrl } from '@angular/platform-browser';
 import {
   SchoolIdentity, TransparencyLevel,
   getTransparencyLevel, getTransparencyColor,
@@ -63,6 +64,36 @@ import {
         <a class="social-icon" *ngIf="identity.socialUrls.linkedin" [href]="identity.socialUrls.linkedin" target="_blank" title="LinkedIn">
           <svg viewBox="0 0 24 24" width="20" height="20"><path fill="#0A66C2" d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
         </a>
+      </div>
+
+      <div class="places-row fade-in" *ngIf="placesData">
+        <div class="places-head">
+          <span class="places-title">Google Reviews</span>
+          <span class="places-score" *ngIf="placesData.rating">★ {{ placesData.rating }} ({{ placesData.totalReviews || 0 }})</span>
+          <a class="info-link" *ngIf="placesData.mapsUrl" [href]="placesData.mapsUrl" target="_blank">View on Maps</a>
+        </div>
+        <div class="review-list" *ngIf="placesReviews.length">
+          <div class="review-item" *ngFor="let r of placesReviews">
+            <div class="review-meta">{{ r.author || 'Reviewer' }} • ★ {{ r.rating || 0 }} <span *ngIf="r.relativeTime">• {{ r.relativeTime }}</span></div>
+            <div class="review-text">{{ r.text || '-' }}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="youtube-row fade-in" *ngIf="youtubeEmbedUrl">
+        <div class="yt-head">
+          <span class="places-title">YouTube</span>
+          <a class="info-link" *ngIf="identity.externalSignals?.youtube?.watchUrl" [href]="identity.externalSignals?.youtube?.watchUrl || '#'" target="_blank">Open video</a>
+        </div>
+        <iframe
+          class="yt-frame"
+          [src]="youtubeEmbedUrl"
+          title="School YouTube video"
+          loading="lazy"
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+          referrerpolicy="strict-origin-when-cross-origin"
+          allowfullscreen>
+        </iframe>
       </div>
 
       <!-- Motto -->
@@ -171,6 +202,15 @@ import {
     }
     .social-icon:hover { transform: scale(1.08); }
     .social-icon svg { display: block; }
+    .places-row, .youtube-row { margin-bottom: 14px; }
+    .places-head, .yt-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px; }
+    .places-title { font-size: 13px; font-weight: 700; color: #334155; }
+    .places-score { font-size: 12px; color: #0f766e; font-weight: 700; }
+    .review-list { display: grid; gap: 6px; }
+    .review-item { border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; background: #f8fafc; }
+    .review-meta { font-size: 12px; color: #475569; margin-bottom: 4px; }
+    .review-text { font-size: 13px; color: #1f2937; }
+    .yt-frame { width: 100%; min-height: 250px; border: 0; border-radius: 10px; background: #0f172a; }
 
     .vision-row {
       margin-bottom: 10px; font-size: 13px;
@@ -234,6 +274,8 @@ import {
   `],
 })
 export class SchoolIdentityComponent {
+  constructor(private readonly sanitizer: DomSanitizer) {}
+
   @Input() identity: SchoolIdentity | null = null;
   @Input() overallScore = 0;
 
@@ -281,5 +323,21 @@ export class SchoolIdentityComponent {
 
   encodeAddr(): string {
     return encodeURIComponent(this.identity?.address || '');
+  }
+
+  get placesData(): NonNullable<NonNullable<SchoolIdentity['externalSignals']>['places']> | null {
+    return this.identity?.externalSignals?.places || null;
+  }
+
+  get placesReviews(): Array<{ author?: string | null; rating?: number | null; text?: string | null; relativeTime?: string | null }> {
+    const reviews = this.placesData?.reviews;
+    return Array.isArray(reviews) ? reviews.slice(0, 5) : [];
+  }
+
+  get youtubeEmbedUrl(): SafeResourceUrl | null {
+    const embed = this.identity?.externalSignals?.youtube?.embedUrl || null;
+    if (!embed) return null;
+    if (!/^https:\/\/www\.youtube\.com\/embed\//i.test(embed)) return null;
+    return this.sanitizer.bypassSecurityTrustResourceUrl(embed);
   }
 }
