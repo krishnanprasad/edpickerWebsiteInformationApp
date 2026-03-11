@@ -114,7 +114,7 @@ nx graph              # Dependency graph
 | POST | `/api/scan` | Submit URL → starts classify pipeline |
 | GET | `/api/scan/:id` | Full status + scores + crawl summary |
 | POST | `/api/scan/:id/ask` | Q&A about scanned content |
-| GET | `/api/scan/:id/school-info-core` | 10-category School Information Core score (0-3 each; OpenAI with Gemini fallback) |
+| GET | `/api/scan/:id/school-info-core` | 10-category School Information Core score (0-5 each; strict missing-first; rendered as 100-point report; OpenAI with Gemini fallback) |
 | GET | `/api/schools/search?q=...` | Public autocomplete for already crawled schools (`crawl_status` in `analysed`,`partial`) |
 
 ### Internal (worker callbacks)

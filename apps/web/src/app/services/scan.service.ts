@@ -94,9 +94,14 @@ export class ScanService {
     return this.http.get<RedFlagsResponse>(`/api/scan/${sessionId}/red-flags`);
   }
 
-  /** Fetch 10-category School Information Core score (0-3 per category). */
+  /** Fetch 10-category School Information Core score (0-5 per category). */
   getSchoolInfoCore(sessionId: string): Observable<SchoolInfoCoreResponse> {
     return this.http.get<SchoolInfoCoreResponse>(`/api/scan/${sessionId}/school-info-core`);
+  }
+
+  /** Verify 6-digit admin PIN for locked School Information Core flow. */
+  verifyAdminPin(pin: string): Observable<{ ok: boolean }> {
+    return this.http.post<{ ok: boolean }>('/api/admin/paid-reports/pin/verify', { pin });
   }
 
   /** Track B2B CTA interest click. */

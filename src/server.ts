@@ -1431,7 +1431,7 @@ RULES:
 });
 
 /* ================================================================== */
-/*  GET /api/scan/:id/school-info-core — 10 categories, 0-3 each       */
+/*  GET /api/scan/:id/school-info-core — 10 categories, 0-5 each       */
 /* ================================================================== */
 
 app.get('/api/scan/:id/school-info-core', async (req, res) => {
@@ -1487,7 +1487,7 @@ app.get('/api/scan/:id/school-info-core', async (req, res) => {
     return rows.slice(0, 10).map((row, idx) => {
       const r = (row && typeof row === 'object') ? row as Record<string, unknown> : {};
       const rawScore = Number(r.score);
-      const score = Number.isFinite(rawScore) ? Math.max(0, Math.min(3, Math.round(rawScore))) : 0;
+      const score = Number.isFinite(rawScore) ? Math.max(0, Math.min(5, Math.round(rawScore))) : 0;
       const statusVal = String(r.status || '').toLowerCase();
       const statusNormalized: CoreRow['status'] =
         statusVal === 'strong_found' ? 'strong_found'
@@ -1508,7 +1508,9 @@ app.get('/api/scan/:id/school-info-core', async (req, res) => {
   const rulesHint = [
     'Use current_rules_full_paid.md spirit for parent-facing strict scoring.',
     'Use ONLY the provided crawl text; do not hallucinate.',
-    'Score mapping: 0=missing, 1=partial/unclear, 2=found but weak access (buried/pdf-only), 3=clearly found and parent-friendly.',
+    'Score mapping: 0=missing, 1=partial/unclear, 2=found but weak access (buried/pdf-only), 3=acceptable but incomplete, 4=strong and parent-friendly, 5=exceptional completeness and freshness.',
+    'Be strict: default to lower score when evidence is uncertain. Prefer identifying missing gaps.',
+    'Do not give 5 unless evidence is strong, fresh, and very complete for parents.',
     'Return strict JSON only.',
   ].join('\n');
 
@@ -1586,7 +1588,7 @@ app.get('/api/scan/:id/school-info-core', async (req, res) => {
   }
 
   const totalScore = normalizedRows.reduce((sum, r) => sum + r.score, 0);
-  const maxScore = 30;
+  const maxScore = 50;
   const percent = Math.round((totalScore / maxScore) * 100);
   const label = percent >= 80 ? 'Strong' : percent >= 50 ? 'Moderate' : 'Needs Improvement';
 

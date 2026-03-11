@@ -115,7 +115,7 @@ const PRACTICAL_RULES: ParentQuestionRule[] = [
             <span class="five-dots" *ngIf="loading && activePanel === 'parents'" aria-hidden="true"><span></span><span></span><span></span></span>
           </button>
           <button class="btn btn-core" [class.btn-loading]="loading && activePanel === 'core'" (click)="runSchoolInfoCoreReport()" [disabled]="loading">
-            <span class="btn-inner" [style.opacity]="loading && activePanel === 'core' ? 0 : 1">2. School Information Core</span>
+            <span class="btn-inner" [style.opacity]="loading && activePanel === 'core' ? 0 : 1"><span class="lock-icon" aria-hidden="true"></span>2. Full Page 100 Points Report</span>
             <span class="five-dots" *ngIf="loading && activePanel === 'core'" aria-hidden="true"><span></span><span></span><span></span></span>
           </button>
           <button class="btn btn-cbse" [class.btn-loading]="loading && activePanel === 'cbse'" (click)="runCbseComplianceReport()" [disabled]="loading">
@@ -128,6 +128,11 @@ const PRACTICAL_RULES: ParentQuestionRule[] = [
         </div>
 
         <p class="error" *ngIf="error">{{ error }}</p>
+      </section>
+
+      <section class="panel school-identity" *ngIf="latestScan">
+        <h2>{{ schoolDisplayName }}</h2>
+        <p class="sub" *ngIf="schoolDisplayAddress">{{ schoolDisplayAddress }}</p>
       </section>
 
       <section class="panel" *ngIf="activePanel === 'parents' && latestScan">
@@ -183,7 +188,7 @@ const PRACTICAL_RULES: ParentQuestionRule[] = [
 
       <section class="panel" *ngIf="activePanel === 'core' && latestScan">
         <h2>School Information Core</h2>
-        <p class="sub">10 categories from current paid rules. Each category is scored on a strict 0-3 scale.</p>
+        <p class="sub">10 categories from current paid rules. Each category is scored on a strict 0-5 scale with missing-first strictness.</p>
         <div class="loading-panel" *ngIf="coreLoading">
           <div class="skel-row" *ngFor="let _ of [0,1,2]">
             <div class="skel-badge"></div>
@@ -191,14 +196,53 @@ const PRACTICAL_RULES: ParentQuestionRule[] = [
           </div>
         </div>
         <ng-container *ngIf="!coreLoading && coreReport">
+          <div class="gauge-grid">
+            <div class="gauge-card">
+              <div class="gauge-title">Full Page Percent</div>
+              <div class="gauge-wrap">
+                <div class="gauge-arc"></div>
+                <div class="gauge-center"></div>
+                <div class="gauge-needle" [style.transform]="'translateX(-50%) rotate(' + gaugeRotation(coreReport.percent) + 'deg)'"></div>
+              </div>
+              <div class="gauge-value">{{ coreReport.percent }}/100</div>
+            </div>
+            <div class="gauge-card">
+              <div class="gauge-title">Transparency</div>
+              <div class="gauge-wrap">
+                <div class="gauge-arc"></div>
+                <div class="gauge-center"></div>
+                <div class="gauge-needle" [style.transform]="'translateX(-50%) rotate(' + gaugeRotation(latestScan.overallScore || 0) + 'deg)'"></div>
+              </div>
+              <div class="gauge-value">{{ latestScan.overallScore || 0 }}/100</div>
+            </div>
+            <div class="gauge-card">
+              <div class="gauge-title">Clarity</div>
+              <div class="gauge-wrap">
+                <div class="gauge-arc"></div>
+                <div class="gauge-center"></div>
+                <div class="gauge-needle" [style.transform]="'translateX(-50%) rotate(' + gaugeRotation(latestScan.clarityScore?.total || 0) + 'deg)'"></div>
+              </div>
+              <div class="gauge-value">{{ latestScan.clarityScore?.total || 0 }}/100</div>
+            </div>
+            <div class="gauge-card">
+              <div class="gauge-title">Safety</div>
+              <div class="gauge-wrap">
+                <div class="gauge-arc"></div>
+                <div class="gauge-center"></div>
+                <div class="gauge-needle" [style.transform]="'translateX(-50%) rotate(' + gaugeRotation(latestScan.safetyScore?.total || 0) + 'deg)'"></div>
+              </div>
+              <div class="gauge-value">{{ latestScan.safetyScore?.total || 0 }}/100</div>
+            </div>
+          </div>
+
           <div class="score-grid">
             <div class="score-box">
               <div class="score-label">Core Score</div>
               <div class="score-value">{{ coreReport.totalScore }}/{{ coreReport.maxScore }}</div>
             </div>
             <div class="score-box">
-              <div class="score-label">Percent</div>
-              <div class="score-value">{{ coreReport.percent }}%</div>
+              <div class="score-label">Full Page Report</div>
+              <div class="score-value">{{ coreReport.percent }}/100</div>
             </div>
             <div class="score-box">
               <div class="score-label">Band</div>
@@ -211,7 +255,7 @@ const PRACTICAL_RULES: ParentQuestionRule[] = [
               <tr>
                 <th>#</th>
                 <th>Category</th>
-                <th>Score (0-3)</th>
+                <th>Score (0-5)</th>
                 <th>Status</th>
                 <th>Reason</th>
                 <th>Evidence</th>
@@ -228,7 +272,6 @@ const PRACTICAL_RULES: ParentQuestionRule[] = [
               </tr>
             </tbody>
           </table>
-          <p class="sub" style="margin-top:10px;">Model used: {{ coreReport.providerUsed }}{{ coreReport.fromCache ? ' (cached)' : '' }}</p>
         </ng-container>
       </section>
 
@@ -318,6 +361,25 @@ const PRACTICAL_RULES: ParentQuestionRule[] = [
           </tbody>
         </table>
       </section>
+
+      <div class="modal-backdrop" *ngIf="showCorePasscodeModal">
+        <div class="modal-card">
+          <h3>Enter 6-digit passcode</h3>
+          <p class="sub">This report is locked. Enter admin passcode to continue.</p>
+          <input
+            type="password"
+            inputmode="numeric"
+            maxlength="6"
+            [(ngModel)]="corePasscode"
+            placeholder="******"
+          />
+          <p class="error" *ngIf="corePasscodeError">{{ corePasscodeError }}</p>
+          <div class="modal-actions">
+            <button class="btn btn-cancel" (click)="closeCorePasscodeModal()" [disabled]="corePasscodeSubmitting">Cancel</button>
+            <button class="btn btn-core" (click)="confirmCorePasscode()" [disabled]="corePasscodeSubmitting">{{ corePasscodeSubmitting ? 'Verifying...' : 'Unlock Report' }}</button>
+          </div>
+        </div>
+      </div>
     </main>
   `,
   styles: [`
@@ -332,6 +394,27 @@ const PRACTICAL_RULES: ParentQuestionRule[] = [
     .btn:disabled { opacity: 0.7; cursor: not-allowed; }
     .btn-loading { box-shadow: 0 0 0 1.5px rgba(255,255,255,0.5) inset; }
     .btn-inner { transition: opacity 0.15s; }
+    .lock-icon {
+      display: inline-block;
+      width: 12px;
+      height: 10px;
+      border: 2px solid rgba(255,255,255,0.95);
+      border-radius: 2px;
+      margin-right: 8px;
+      position: relative;
+      top: 1px;
+    }
+    .lock-icon::before {
+      content: '';
+      position: absolute;
+      left: 1px;
+      top: -8px;
+      width: 6px;
+      height: 6px;
+      border: 2px solid rgba(255,255,255,0.95);
+      border-bottom: 0;
+      border-radius: 6px 6px 0 0;
+    }
     .btn-parents { background: #0f766e; }
     .btn-core { background: #0e7490; }
     .btn-cbse { background: #1d4ed8; }
@@ -357,6 +440,29 @@ const PRACTICAL_RULES: ParentQuestionRule[] = [
     .q-pill.q-ok { background: #dcfce7; color: #166534; }
     .q-pill.q-miss { background: #fee2e2; color: #991b1b; }
     .sub { color: #4b6478; margin: 0 0 10px; }
+    .school-identity h2 { margin: 0; font-size: 24px; }
+    .gauge-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+    .gauge-card { border: 1px solid #d4e2ee; border-radius: 10px; padding: 10px; background: #fcfdff; text-align: center; }
+    .gauge-title { font-size: 12px; color: #4b6478; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; }
+    .gauge-wrap { width: 130px; height: 70px; margin: 6px auto 4px; position: relative; overflow: hidden; }
+    .gauge-arc {
+      width: 130px; height: 130px; border-radius: 50%;
+      background: conic-gradient(from 180deg, #dc2626 0deg 36deg, #f97316 36deg 72deg, #facc15 72deg 108deg, #a3e635 108deg 144deg, #22c55e 144deg 180deg, transparent 180deg 360deg);
+      position: absolute; left: 0; top: 0;
+    }
+    .gauge-center {
+      width: 86px; height: 86px; border-radius: 50%; background: #fff;
+      position: absolute; left: 22px; top: 44px; border: 1px solid #e5edf4;
+    }
+    .gauge-needle {
+      position: absolute; left: 50%; bottom: 6px; width: 2px; height: 56px;
+      background: #111827; transform-origin: bottom center; transition: transform 0.25s ease;
+    }
+    .gauge-needle::after {
+      content: ''; width: 10px; height: 10px; background: #111827; border-radius: 50%;
+      position: absolute; left: -4px; bottom: -2px;
+    }
+    .gauge-value { font-size: 18px; font-weight: 800; color: #0f172a; }
     .cbse-highlight { margin: 0 0 10px; padding: 10px 12px; border-radius: 10px; background: #eff6ff; border: 1px solid #bfdbfe; color: #1e3a8a; font-size: 13px; }
     .cbse-warning { margin: 0 0 10px; padding: 10px 12px; border-radius: 10px; background: #fff7ed; border: 1px solid #fed7aa; color: #9a3412; font-size: 13px; }
     .report-table { width: 100%; border-collapse: collapse; }
@@ -379,10 +485,21 @@ const PRACTICAL_RULES: ParentQuestionRule[] = [
     .skel-line { height:11px; border-radius:4px; background:linear-gradient(90deg,#e0e0e0 25%,#eeeeee 50%,#e0e0e0 75%); background-size:200% 100%; animation:skelsh 1.4s infinite; }
     .skel-line.long { width:80%; } .skel-line.short { width:55%; animation-delay:0.15s; }
     @keyframes skelsh { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+    .modal-backdrop {
+      position: fixed; inset: 0; background: rgba(2,6,23,0.45); display: flex; align-items: center; justify-content: center; z-index: 1000;
+    }
+    .modal-card {
+      width: min(92vw, 420px); background: #fff; border-radius: 12px; border: 1px solid #d4e2ee; padding: 16px;
+      box-shadow: 0 16px 40px rgba(15, 23, 42, 0.2);
+    }
+    .modal-card h3 { margin: 0 0 8px; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+    .btn-cancel { background: #475569; }
     @media (max-width: 900px) {
       .btn-row { grid-template-columns: 1fr; }
       .score-grid { grid-template-columns: 1fr; }
       .question-grid { grid-template-columns: 1fr; }
+      .gauge-grid { grid-template-columns: 1fr 1fr; }
     }
   `],
 })
@@ -397,6 +514,10 @@ export class SchoolAdminComponent {
   error = '';
   latestScan: ScanResponse | null = null;
   coreReport: SchoolInfoCoreResponse | null = null;
+  showCorePasscodeModal = false;
+  corePasscode = '';
+  corePasscodeError = '';
+  corePasscodeSubmitting = false;
 
   competitorUrls = ['', '', ''];
   competitorResults: ScanResponse[] = [];
@@ -412,8 +533,72 @@ export class SchoolAdminComponent {
   }
 
   runSchoolInfoCoreReport() {
-    this.activePanel = 'core';
-    this.runPrimaryScan();
+    this.showCorePasscodeModal = true;
+    this.corePasscode = '';
+    this.corePasscodeError = '';
+    this.corePasscodeSubmitting = false;
+  }
+
+  closeCorePasscodeModal() {
+    this.showCorePasscodeModal = false;
+    this.corePasscode = '';
+    this.corePasscodeError = '';
+    this.corePasscodeSubmitting = false;
+  }
+
+  confirmCorePasscode() {
+    const pin = (this.corePasscode || '').trim();
+    if (!/^\d{6}$/.test(pin)) {
+      this.corePasscodeError = 'Enter a valid 6-digit passcode.';
+      return;
+    }
+
+    this.corePasscodeSubmitting = true;
+    this.corePasscodeError = '';
+    this.scanService.verifyAdminPin(pin).subscribe({
+      next: (res) => {
+        if (!res?.ok) {
+          this.corePasscodeError = 'Invalid or expired passcode.';
+          this.corePasscodeSubmitting = false;
+          return;
+        }
+        this.closeCorePasscodeModal();
+        this.activePanel = 'core';
+        this.runPrimaryScan();
+      },
+      error: () => {
+        this.corePasscodeError = 'Passcode verification failed. Please try again.';
+        this.corePasscodeSubmitting = false;
+      },
+    });
+  }
+
+  get schoolDisplayName(): string {
+    const explicitName = (this.latestScan?.earlyIdentity?.schoolName || '').trim();
+    if (explicitName) return explicitName;
+
+    const rawUrl = this.latestScan?.url || this.primaryUrl;
+    if (!rawUrl) return 'School';
+
+    try {
+      const host = new URL(this.normalizeInputUrl(rawUrl)).hostname.replace(/^www\./i, '');
+      const first = host.split('.')[0] || host;
+      return first
+        .split(/[-_]+/)
+        .map((p) => p ? p.charAt(0).toUpperCase() + p.slice(1) : p)
+        .join(' ');
+    } catch {
+      return 'School';
+    }
+  }
+
+  get schoolDisplayAddress(): string {
+    return (this.latestScan?.earlyIdentity?.address || '').trim();
+  }
+
+  gaugeRotation(score: number): number {
+    const clamped = Math.max(0, Math.min(100, Number(score) || 0));
+    return -90 + (clamped * 180) / 100;
   }
 
   activateCompetitorPanel() {
@@ -482,6 +667,15 @@ export class SchoolAdminComponent {
 
     this.loading = true;
     const normalizedUrl = this.normalizeInputUrl(url);
+    const prevUrl = (this.latestScan?.url || '').toLowerCase();
+    const isDifferentSchool = !!prevUrl && prevUrl !== normalizedUrl.toLowerCase();
+    if (isDifferentSchool) {
+      this.latestScan = null;
+      this.coreReport = null;
+    }
+    if (this.activePanel !== 'core') {
+      this.coreReport = null;
+    }
     this.primaryUrl = normalizedUrl;
     this.scanToTerminal(normalizedUrl).subscribe({
       next: (scan) => {

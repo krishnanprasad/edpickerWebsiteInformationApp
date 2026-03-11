@@ -220,7 +220,7 @@ export type SchoolInfoCoreStatus = 'missing' | 'partial' | 'weak_found' | 'stron
 export interface SchoolInfoCoreCategory {
   categoryNumber: number;
   categoryName: string;
-  score: number; // 0..3
+  score: number; // 0..5
   status: SchoolInfoCoreStatus;
   reason: string;
   evidence: string;
