@@ -38,6 +38,17 @@ import { AnalyticsService } from '../services/analytics.service';
           <div class="meta-chip">Generated: {{ formatDateTime(data.generatedAt) }}</div>
           <div class="meta-chip warn">Users: {{ data.users.note }}</div>
         </div>
+        <div class="filter-row">
+          <div class="date-filter">
+            <label for="from-date">From</label>
+            <input id="from-date" type="date" [(ngModel)]="fromDate" />
+          </div>
+          <div class="date-filter">
+            <label for="to-date">To</label>
+            <input id="to-date" type="date" [(ngModel)]="toDate" />
+          </div>
+          <button type="button" (click)="clearDateFilter()">Clear Date Filter</button>
+        </div>
 
         <section class="card">
           <h2>Core KPIs</h2>
@@ -67,10 +78,15 @@ import { AnalyticsService } from '../services/analytics.service';
           <h3>Slowest schools</h3>
           <table class="table">
             <thead>
-              <tr><th>School</th><th>Duration</th><th>Completed</th><th>URL</th></tr>
+              <tr>
+                <th class="sortable" (click)="setSort('slowestSchools', 'schoolName')">School</th>
+                <th class="sortable" (click)="setSort('slowestSchools', 'durationMs')">Duration</th>
+                <th class="sortable" (click)="setSort('slowestSchools', 'completedAt')">Completed</th>
+                <th class="sortable" (click)="setSort('slowestSchools', 'url')">URL</th>
+              </tr>
             </thead>
             <tbody>
-              <tr *ngFor="let row of data.crawlTime.slowestSchools">
+              <tr *ngFor="let row of slowestSchoolsRows()">
                 <td>{{ row.schoolName }}</td>
                 <td>{{ formatMs(row.durationMs) }}</td>
                 <td>{{ row.completedAt ? formatDateTime(row.completedAt) : '-' }}</td>
@@ -89,10 +105,14 @@ import { AnalyticsService } from '../services/analytics.service';
           <h3>Most compared schools</h3>
           <table class="table">
             <thead>
-              <tr><th>School</th><th>Website</th><th>Compare adds</th></tr>
+              <tr>
+                <th class="sortable" (click)="setSort('mostComparedSchools', 'schoolName')">School</th>
+                <th class="sortable" (click)="setSort('mostComparedSchools', 'website')">Website</th>
+                <th class="sortable" (click)="setSort('mostComparedSchools', 'compareAdds')">Compare adds</th>
+              </tr>
             </thead>
             <tbody>
-              <tr *ngFor="let row of data.comparisons.mostComparedSchools">
+              <tr *ngFor="let row of mostComparedSchoolsRows()">
                 <td>{{ row.schoolName }}</td>
                 <td class="truncate">{{ row.website }}</td>
                 <td>{{ row.compareAdds }}</td>
@@ -106,10 +126,14 @@ import { AnalyticsService } from '../services/analytics.service';
           <h3>Questions by school</h3>
           <table class="table">
             <thead>
-              <tr><th>School</th><th>Website</th><th>Total questions</th></tr>
+              <tr>
+                <th class="sortable" (click)="setSort('questionsBySchool', 'schoolName')">School</th>
+                <th class="sortable" (click)="setSort('questionsBySchool', 'website')">Website</th>
+                <th class="sortable" (click)="setSort('questionsBySchool', 'totalQuestions')">Total questions</th>
+              </tr>
             </thead>
             <tbody>
-              <tr *ngFor="let row of data.questions.bySchool">
+              <tr *ngFor="let row of questionsBySchoolRows()">
                 <td>{{ row.schoolName }}</td>
                 <td class="truncate">{{ row.website }}</td>
                 <td>{{ row.totalQuestions }}</td>
@@ -120,10 +144,14 @@ import { AnalyticsService } from '../services/analytics.service';
           <h3>Latest questions</h3>
           <table class="table">
             <thead>
-              <tr><th>Asked at</th><th>School</th><th>Question</th></tr>
+              <tr>
+                <th class="sortable" (click)="setSort('latestQuestions', 'askedAt')">Asked at</th>
+                <th class="sortable" (click)="setSort('latestQuestions', 'schoolName')">School</th>
+                <th class="sortable" (click)="setSort('latestQuestions', 'question')">Question</th>
+              </tr>
             </thead>
             <tbody>
-              <tr *ngFor="let row of data.questions.latest">
+              <tr *ngFor="let row of latestQuestionsRows()">
                 <td>{{ formatDateTime(row.askedAt) }}</td>
                 <td>{{ row.schoolName }}</td>
                 <td>{{ row.question }}</td>
@@ -137,10 +165,14 @@ import { AnalyticsService } from '../services/analytics.service';
           <h3>Most scanned schools</h3>
           <table class="table">
             <thead>
-              <tr><th>School</th><th>Website</th><th>Scans</th></tr>
+              <tr>
+                <th class="sortable" (click)="setSort('mostScannedSchools', 'schoolName')">School</th>
+                <th class="sortable" (click)="setSort('mostScannedSchools', 'website')">Website</th>
+                <th class="sortable" (click)="setSort('mostScannedSchools', 'scans')">Scans</th>
+              </tr>
             </thead>
             <tbody>
-              <tr *ngFor="let row of data.popularity.mostScannedSchools">
+              <tr *ngFor="let row of mostScannedSchoolsRows()">
                 <td>{{ row.schoolName }}</td>
                 <td class="truncate">{{ row.website }}</td>
                 <td>{{ row.scans }}</td>
@@ -152,10 +184,15 @@ import { AnalyticsService } from '../services/analytics.service';
           <p class="sub-warn">{{ data.popularity.countersReliabilityNote }}</p>
           <table class="table">
             <thead>
-              <tr><th>School</th><th>Views</th><th>Compares</th><th>Searches</th></tr>
+              <tr>
+                <th class="sortable" (click)="setSort('topSchoolCounters', 'schoolName')">School</th>
+                <th class="sortable" (click)="setSort('topSchoolCounters', 'viewCount')">Views</th>
+                <th class="sortable" (click)="setSort('topSchoolCounters', 'compareCount')">Compares</th>
+                <th class="sortable" (click)="setSort('topSchoolCounters', 'searchCount')">Searches</th>
+              </tr>
             </thead>
             <tbody>
-              <tr *ngFor="let row of data.popularity.topSchoolCounters">
+              <tr *ngFor="let row of topSchoolCountersRows()">
                 <td>{{ row.schoolName }}</td>
                 <td>{{ row.viewCount }}</td>
                 <td>{{ row.compareCount }}</td>
@@ -169,10 +206,14 @@ import { AnalyticsService } from '../services/analytics.service';
           <h2>Schools Crawled</h2>
           <table class="table">
             <thead>
-              <tr><th>Name</th><th>Website</th><th>Last crawled</th></tr>
+              <tr>
+                <th class="sortable" (click)="setSort('schoolsCrawledList', 'name')">Name</th>
+                <th class="sortable" (click)="setSort('schoolsCrawledList', 'website')">Website</th>
+                <th class="sortable" (click)="setSort('schoolsCrawledList', 'lastCrawledAt')">Last crawled</th>
+              </tr>
             </thead>
             <tbody>
-              <tr *ngFor="let row of data.totals.schoolsCrawledList">
+              <tr *ngFor="let row of schoolsCrawledRows()">
                 <td>{{ row.name }}</td>
                 <td class="truncate">{{ row.website }}</td>
                 <td>{{ row.lastCrawledAt ? formatDateTime(row.lastCrawledAt) : '-' }}</td>
@@ -196,6 +237,9 @@ import { AnalyticsService } from '../services/analytics.service';
     button:disabled { opacity: 0.7; cursor: not-allowed; }
     .error { color: #b91c1c; margin-top: 10px; }
     .meta-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+    .filter-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-bottom: 12px; }
+    .date-filter { display: flex; flex-direction: column; gap: 4px; min-width: 180px; }
+    .date-filter label { font-size: 12px; color: #475569; }
     .meta-chip { font-size: 12px; border-radius: 999px; padding: 4px 10px; background: #e0f2fe; color: #0c4a6e; }
     .meta-chip.warn { background: #fff7ed; color: #9a3412; }
     .card { margin-bottom: 12px; border: 1px solid #d8e2ec; border-radius: 14px; padding: 14px; background: #fff; }
@@ -208,6 +252,8 @@ import { AnalyticsService } from '../services/analytics.service';
     .kpi .v { margin-top: 4px; font-size: 22px; font-weight: 800; color: #0f172a; }
     .table { width: 100%; border-collapse: collapse; font-size: 13px; }
     .table th, .table td { border-bottom: 1px solid #e2e8f0; text-align: left; padding: 8px 6px; vertical-align: top; }
+    .table th.sortable { cursor: pointer; user-select: none; }
+    .table th.sortable:hover { color: #0f766e; }
     .truncate { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .sub-warn { margin: 0 0 8px; color: #9a3412; font-size: 12px; }
     @media (max-width: 960px) {
@@ -220,11 +266,22 @@ import { AnalyticsService } from '../services/analytics.service';
 })
 export class AnalyticsPageComponent {
   private readonly analyticsService = inject(AnalyticsService);
+  private readonly sortState: Record<string, { key: string; dir: 'asc' | 'desc' }> = {
+    slowestSchools: { key: 'completedAt', dir: 'desc' },
+    mostComparedSchools: { key: 'compareAdds', dir: 'desc' },
+    questionsBySchool: { key: 'totalQuestions', dir: 'desc' },
+    latestQuestions: { key: 'askedAt', dir: 'desc' },
+    mostScannedSchools: { key: 'scans', dir: 'desc' },
+    topSchoolCounters: { key: 'viewCount', dir: 'desc' },
+    schoolsCrawledList: { key: 'lastCrawledAt', dir: 'desc' },
+  };
 
   password = '';
   loading = false;
   error = '';
   data: AnalyticsOverviewResponse | null = null;
+  fromDate = '';
+  toDate = '';
 
   unlock() {
     this.error = '';
@@ -262,5 +319,118 @@ export class AnalyticsPageComponent {
     const date = new Date(input);
     if (Number.isNaN(date.getTime())) return input;
     return date.toLocaleString();
+  }
+
+  clearDateFilter() {
+    this.fromDate = '';
+    this.toDate = '';
+  }
+
+  setSort(table: string, key: string) {
+    const current = this.sortState[table];
+    if (!current) return;
+    if (current.key === key) {
+      current.dir = current.dir === 'desc' ? 'asc' : 'desc';
+      return;
+    }
+    current.key = key;
+    current.dir = 'desc';
+  }
+
+  slowestSchoolsRows() {
+    const rows = this.data?.crawlTime.slowestSchools || [];
+    return this.sortRows(this.filterByDateRange(rows, (r) => r.completedAt), this.sortState.slowestSchools);
+  }
+
+  mostComparedSchoolsRows() {
+    const rows = this.data?.comparisons.mostComparedSchools || [];
+    return this.sortRows(rows, this.sortState.mostComparedSchools);
+  }
+
+  questionsBySchoolRows() {
+    const rows = this.data?.questions.bySchool || [];
+    return this.sortRows(rows, this.sortState.questionsBySchool);
+  }
+
+  latestQuestionsRows() {
+    const rows = this.data?.questions.latest || [];
+    return this.sortRows(this.filterByDateRange(rows, (r) => r.askedAt), this.sortState.latestQuestions);
+  }
+
+  mostScannedSchoolsRows() {
+    const rows = this.data?.popularity.mostScannedSchools || [];
+    return this.sortRows(rows, this.sortState.mostScannedSchools);
+  }
+
+  topSchoolCountersRows() {
+    const rows = this.data?.popularity.topSchoolCounters || [];
+    return this.sortRows(rows, this.sortState.topSchoolCounters);
+  }
+
+  schoolsCrawledRows() {
+    const rows = this.data?.totals.schoolsCrawledList || [];
+    return this.sortRows(this.filterByDateRange(rows, (r) => r.lastCrawledAt), this.sortState.schoolsCrawledList);
+  }
+
+  private filterByDateRange<T>(rows: T[], valueSelector: (row: T) => string | null): T[] {
+    const from = this.parseDateStart(this.fromDate);
+    const to = this.parseDateEnd(this.toDate);
+    if (!from && !to) return rows;
+
+    return rows.filter((row) => {
+      const raw = valueSelector(row);
+      if (!raw) return false;
+      const time = new Date(raw).getTime();
+      if (Number.isNaN(time)) return false;
+      if (from !== null && time < from) return false;
+      if (to !== null && time > to) return false;
+      return true;
+    });
+  }
+
+  private parseDateStart(input: string): number | null {
+    if (!input) return null;
+    const d = new Date(`${input}T00:00:00`);
+    return Number.isNaN(d.getTime()) ? null : d.getTime();
+  }
+
+  private parseDateEnd(input: string): number | null {
+    if (!input) return null;
+    const d = new Date(`${input}T23:59:59.999`);
+    return Number.isNaN(d.getTime()) ? null : d.getTime();
+  }
+
+  private sortRows<T extends Record<string, unknown>>(rows: T[], sort: { key: string; dir: 'asc' | 'desc' }): T[] {
+    const list = [...rows];
+    const sign = sort.dir === 'desc' ? -1 : 1;
+    const key = sort.key;
+
+    list.sort((a, b) => {
+      const av = a[key];
+      const bv = b[key];
+
+      const at = this.asTime(av);
+      const bt = this.asTime(bv);
+      if (at !== null && bt !== null) return (at - bt) * sign;
+
+      const an = this.asNumber(av);
+      const bn = this.asNumber(bv);
+      if (an !== null && bn !== null) return (an - bn) * sign;
+
+      return String(av ?? '').localeCompare(String(bv ?? '')) * sign;
+    });
+
+    return list;
+  }
+
+  private asTime(value: unknown): number | null {
+    if (typeof value !== 'string') return null;
+    const t = new Date(value).getTime();
+    return Number.isNaN(t) ? null : t;
+  }
+
+  private asNumber(value: unknown): number | null {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    return null;
   }
 }

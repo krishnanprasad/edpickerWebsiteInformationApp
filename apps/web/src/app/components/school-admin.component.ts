@@ -98,6 +98,7 @@ const PRACTICAL_RULES: ParentQuestionRule[] = [
           <h1>School Admin Console</h1>
           <p>Demo-ready flow for school stakeholders and sales discussions.</p>
         </div>
+        <a class="home-link" href="/">Back to Home</a>
       </header>
 
       <section class="input-card">
@@ -115,17 +116,19 @@ const PRACTICAL_RULES: ParentQuestionRule[] = [
             <span class="five-dots" *ngIf="loading && activePanel === 'parents'" aria-hidden="true"><span></span><span></span><span></span></span>
           </button>
           <button class="btn btn-core" [class.btn-loading]="loading && activePanel === 'core'" (click)="runSchoolInfoCoreReport()" [disabled]="loading">
-            <span class="btn-inner" [style.opacity]="loading && activePanel === 'core' ? 0 : 1"><span class="lock-icon" aria-hidden="true"></span>2. Full Page 100 Points Report</span>
+            <span class="btn-inner" [style.opacity]="loading && activePanel === 'core' ? 0 : 1">2. Category Based Score</span>
             <span class="five-dots" *ngIf="loading && activePanel === 'core'" aria-hidden="true"><span></span><span></span><span></span></span>
           </button>
-          <button class="btn btn-cbse" [class.btn-loading]="loading && activePanel === 'cbse'" (click)="runCbseComplianceReport()" [disabled]="loading">
-            <span class="btn-inner" [style.opacity]="loading && activePanel === 'cbse' ? 0 : 1">3. CBSE Compliance Report</span>
-            <span class="five-dots" *ngIf="loading && activePanel === 'cbse'" aria-hidden="true"><span></span><span></span><span></span></span>
+          <button class="btn btn-cbse btn-disabled" disabled title="CBSE report is temporarily disabled">
+            <span class="btn-inner">3. CBSE Compliance Report</span>
           </button>
           <button class="btn btn-compare" (click)="activateCompetitorPanel()">
             4. Competitor Comparison
           </button>
         </div>
+        <button class="btn btn-full-report" (click)="openFullReportModal()" [disabled]="loading">
+          <span class="lock-icon" aria-hidden="true"></span>FULL Report - 100 Points
+        </button>
 
         <p class="error" *ngIf="error">{{ error }}</p>
       </section>
@@ -187,8 +190,8 @@ const PRACTICAL_RULES: ParentQuestionRule[] = [
       </section>
 
       <section class="panel" *ngIf="activePanel === 'core' && latestScan">
-        <h2>School Information Core</h2>
-        <p class="sub">10 categories from current paid rules. Each category is scored on a strict 0-5 scale with missing-first strictness.</p>
+        <h2>Category Based Score</h2>
+        <p class="sub">10 categories. For each category, the report highlights important information that is missing or weak on the website.</p>
         <div class="loading-panel" *ngIf="coreLoading">
           <div class="skel-row" *ngFor="let _ of [0,1,2]">
             <div class="skel-badge"></div>
@@ -384,8 +387,10 @@ const PRACTICAL_RULES: ParentQuestionRule[] = [
   `,
   styles: [`
     .admin-shell { max-width: 1120px; margin: 0 auto; padding: 20px; color: #13293d; }
+    .admin-header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
     .admin-header h1 { margin: 0; font-size: 32px; }
     .admin-header p { margin: 8px 0 0; color: #415a77; }
+    .home-link { color: #0f766e; text-decoration: none; font-weight: 700; white-space: nowrap; margin-top: 6px; }
     .input-card, .panel { background: #fff; border: 1px solid #d8e2ec; border-radius: 14px; padding: 16px; margin-top: 14px; }
     label { display: block; font-weight: 600; margin-bottom: 8px; }
     input { width: 100%; box-sizing: border-box; border: 1px solid #b9c9d8; border-radius: 10px; padding: 10px 12px; font-size: 14px; }
@@ -419,6 +424,8 @@ const PRACTICAL_RULES: ParentQuestionRule[] = [
     .btn-core { background: #0e7490; }
     .btn-cbse { background: #1d4ed8; }
     .btn-compare { background: #b45309; margin-top: 12px; }
+    .btn-full-report { background: #b91c1c; margin-top: 12px; width: 100%; }
+    .btn-disabled { background: #94a3b8; color: #f8fafc; cursor: not-allowed; }
     .error { color: #b91c1c; margin-top: 10px; }
     .score-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }
     .score-box { border: 1px solid #d4e2ee; border-radius: 10px; padding: 10px; background: #f8fbff; }
@@ -497,6 +504,7 @@ const PRACTICAL_RULES: ParentQuestionRule[] = [
     .btn-cancel { background: #475569; }
     @media (max-width: 900px) {
       .btn-row { grid-template-columns: 1fr; }
+      .admin-header { flex-direction: column; }
       .score-grid { grid-template-columns: 1fr; }
       .question-grid { grid-template-columns: 1fr; }
       .gauge-grid { grid-template-columns: 1fr 1fr; }
@@ -533,6 +541,11 @@ export class SchoolAdminComponent {
   }
 
   runSchoolInfoCoreReport() {
+    this.activePanel = 'core';
+    this.runPrimaryScan();
+  }
+
+  openFullReportModal() {
     this.showCorePasscodeModal = true;
     this.corePasscode = '';
     this.corePasscodeError = '';
