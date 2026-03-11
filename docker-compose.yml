@@ -17,6 +17,8 @@ services:
       - ./sql/migrations/004_compare_lists.sql:/docker-entrypoint-initdb.d/05-compare-lists.sql:ro
       - ./sql/migrations/005_schools_registry.sql:/docker-entrypoint-initdb.d/06-schools-registry.sql:ro
       - ./sql/migrations/006_mandatory_documents.sql:/docker-entrypoint-initdb.d/07-mandatory-documents.sql:ro
+      - ./sql/migrations/008_ai_audit.sql:/docker-entrypoint-initdb.d/08-ai-audit.sql:ro
+      - ./sql/migrations/009_paid_reports_v1.sql:/docker-entrypoint-initdb.d/09-paid-reports-v1.sql:ro
 
   redis:
     image: redis:7-alpine
@@ -50,11 +52,30 @@ services:
       CLASSIFY_QUEUE_NAME: schoollens-classify
       CRAWLER_QUEUE_NAME: schoollens-crawl
       SCORING_QUEUE_NAME: schoollens-score
+      PAID_REPORT_QUEUE_NAME: schoollens-paid-report
+      PAID_REPORT_QUEUE_CONCURRENCY: 2
+      PAID_REPORT_TIMEOUT_MS: 1800000
       EDUCATION_CONFIDENCE_THRESHOLD: 60
       INTERNAL_API_KEY: change-me
       B2B_CTA_URL: https://edpicker.com/verify
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL_CHAT: ${OPENAI_MODEL_CHAT:-gpt-4o-mini}
+      OPENAI_MODEL_PAID_REPORT: ${OPENAI_MODEL_PAID_REPORT:-gpt-4o}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL_PAID_REPORT: ${GEMINI_MODEL_PAID_REPORT:-gemini-1.5-pro}
+      CLAUDE_API_KEY: ${CLAUDE_API_KEY:-}
+      CLAUDE_MODEL_PAID_REPORT: ${CLAUDE_MODEL_PAID_REPORT:-claude-sonnet-4-20250514}
+      GROK_API_KEY: ${GROK_API_KEY:-}
+      GROK_MODEL_PAID_REPORT: ${GROK_MODEL_PAID_REPORT:-grok-3-mini}
+      GOOGLE_PLACES_API_KEY: ${GOOGLE_PLACES_API_KEY:-}
+      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
+      ADMIN_GLOBAL_PIN_ROTATE_MINUTES: 60
+      OPS_ALERT_EMAIL_TO: ${OPS_ALERT_EMAIL_TO:-edpickerteam@gmail.com}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-alerts@schoollens.local}
       STORAGE_PROVIDER: s3
       STORAGE_BUCKET: schoollens-assets
       S3_ENDPOINT: http://minio:9000
@@ -83,14 +104,44 @@ services:
       CLASSIFY_QUEUE_NAME: schoollens-classify
       CRAWLER_QUEUE_NAME: schoollens-crawl
       SCORING_QUEUE_NAME: schoollens-score
+      PAID_REPORT_QUEUE_NAME: schoollens-paid-report
+      PAID_REPORT_QUEUE_CONCURRENCY: 2
+      PAID_REPORT_TIMEOUT_MS: 1800000
       EDUCATION_CONFIDENCE_THRESHOLD: 60
       CRAWLER_API_BASE_URL: http://api:3000
       INTERNAL_API_KEY: change-me
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL_SCORING: gpt-4o-mini
+      OPENAI_MODEL_PAID_REPORT: ${OPENAI_MODEL_PAID_REPORT:-gpt-4o}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL_PAID_REPORT: ${GEMINI_MODEL_PAID_REPORT:-gemini-1.5-pro}
+      CLAUDE_API_KEY: ${CLAUDE_API_KEY:-}
+      CLAUDE_MODEL_PAID_REPORT: ${CLAUDE_MODEL_PAID_REPORT:-claude-sonnet-4-20250514}
+      GROK_API_KEY: ${GROK_API_KEY:-}
+      GROK_MODEL_PAID_REPORT: ${GROK_MODEL_PAID_REPORT:-grok-3-mini}
     depends_on:
       - api
       - redis
+
+  crawl-all-website:
+    image: node:20-alpine
+    profiles:
+      - tools
+    working_dir: /app
+    command: sh -c "npm install --legacy-peer-deps --no-package-lock && npx tsx src/crawl-all-website.ts"
+    volumes:
+      - ./:/app
+      - /app/node_modules
+      - /app/apps/web/node_modules
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      CRAWL_ALL_API_BASE_URL: http://api:3000
+      CRAWL_ALL_CONCURRENCY: ${CRAWL_ALL_CONCURRENCY:-5}
+      CRAWL_ALL_LIMIT: ${CRAWL_ALL_LIMIT:-0}
+      CRAWL_ALL_INCLUDE_ANALYSED: ${CRAWL_ALL_INCLUDE_ANALYSED:-0}
+      CRAWL_ALL_DRY_RUN: ${CRAWL_ALL_DRY_RUN:-0}
+    depends_on:
+      - api
 
 volumes:
   pgdata:

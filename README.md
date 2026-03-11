@@ -54,6 +54,28 @@ cp .env.example .env
 docker compose up --build
 ```
 
+### 2.1 Bulk crawl all schools from DB
+This runs a one-off Docker job named `crawl-all-website` and enqueues scans for all rows in `schools.website_url`.
+
+```bash
+docker compose --profile tools run --rm crawl-all-website
+```
+
+Useful overrides:
+```bash
+# Process only first N schools
+CRAWL_ALL_LIMIT=2000 docker compose --profile tools run --rm crawl-all-website
+
+# Increase parallel enqueue speed
+CRAWL_ALL_CONCURRENCY=10 docker compose --profile tools run --rm crawl-all-website
+
+# Include already analysed schools too
+CRAWL_ALL_INCLUDE_ANALYSED=1 docker compose --profile tools run --rm crawl-all-website
+
+# Dry run (no API calls)
+CRAWL_ALL_DRY_RUN=1 docker compose --profile tools run --rm crawl-all-website
+```
+
 ### 3. Run migration (existing databases)
 If the database already has the base schema, apply the migrations manually:
 ```bash
@@ -63,6 +85,8 @@ psql $DATABASE_URL -f sql/migrations/003_crawler_v2.sql
 psql $DATABASE_URL -f sql/migrations/004_compare_lists.sql
 psql $DATABASE_URL -f sql/migrations/005_schools_registry.sql
 psql $DATABASE_URL -f sql/migrations/006_mandatory_documents.sql
+psql $DATABASE_URL -f sql/migrations/008_ai_audit.sql
+psql $DATABASE_URL -f sql/migrations/009_paid_reports_v1.sql
 ```
 New databases auto-apply schema + migrations via Docker init scripts.
 
@@ -70,6 +94,9 @@ New databases auto-apply schema + migrations via Docker init scripts.
 - **Angular app**: `http://localhost:4200` (via `nx run web:dev`)
 - **API + static UI**: `http://localhost:3000`
 - **MinIO console**: `http://localhost:9001`
+- **Analytics dashboard**: `http://localhost:4200/analytics` (or `http://localhost:3000/analytics`)
+  - Default password: `123456`
+  - Override with env: `ANALYTICS_PASSWORD=your-password`
 
 ## Nx Commands
 ```bash
@@ -87,6 +114,8 @@ nx graph              # Dependency graph
 | POST | `/api/scan` | Submit URL → starts classify pipeline |
 | GET | `/api/scan/:id` | Full status + scores + crawl summary |
 | POST | `/api/scan/:id/ask` | Q&A about scanned content |
+| GET | `/api/scan/:id/school-info-core` | 10-category School Information Core score (0-3 each; OpenAI with Gemini fallback) |
+| GET | `/api/schools/search?q=...` | Public autocomplete for already crawled schools (`crawl_status` in `analysed`,`partial`) |
 
 ### Internal (worker callbacks)
 | Method | Path | Description |
@@ -118,13 +147,35 @@ nx graph              # Dependency graph
 | `CLASSIFY_QUEUE_NAME` | `schoollens-classify` | Classification queue |
 | `CRAWLER_QUEUE_NAME` | `schoollens-crawl` | Crawl queue |
 | `SCORING_QUEUE_NAME` | `schoollens-score` | Scoring queue |
+| `PAID_REPORT_QUEUE_NAME` | `schoollens-paid-report` | Paid report orchestration queue |
+| `PAID_REPORT_QUEUE_CONCURRENCY` | `2` | Max parallel paid reports |
+| `PAID_REPORT_TIMEOUT_MS` | `1800000` | Whole paid report timeout (30 min) |
 | `EDUCATION_CONFIDENCE_THRESHOLD` | `60` | Min % to pass classification |
 | `OPENAI_API_KEY` | — | OpenAI key (optional, enables AI scoring) |
 | `OPENAI_MODEL_CHAT` | `gpt-4o` | Model for Q&A |
 | `OPENAI_MODEL_SCORING` | `gpt-4o-mini` | Model for score extraction |
+| `OPENAI_MODEL_PAID_REPORT` | `gpt-4o` | Paid report layer-1 model |
+| `GEMINI_API_KEY` | — | Gemini API key |
+| `GEMINI_MODEL_PAID_REPORT` | `gemini-1.5-pro` | Paid report layer-2 model |
+| `CLAUDE_API_KEY` | — | Claude API key (paid report synthesis) |
+| `CLAUDE_MODEL_PAID_REPORT` | `claude-sonnet-4-20250514` | Paid report layer-3 model |
+| `GROK_API_KEY` | — | Grok API key (fallback model). `X_API_KEY` is also accepted as alias. |
+| `GROK_BASE_URL` | `https://api.x.ai/v1` | Grok API base URL |
+| `GROK_MODEL_PAID_REPORT` | `grok-3-mini` | Paid report fallback model |
+| `GOOGLE_PLACES_API_KEY` | — | Places API key for fresh rating/reviews |
+| `YOUTUBE_API_KEY` | — | YouTube data API key for social snapshot |
 | `INTERNAL_API_KEY` | `change-me` | Shared secret for worker callbacks |
+| `ADMIN_GLOBAL_PIN_ROTATE_MINUTES` | `60` | Rotation window for global 6-digit admin PIN |
+| `SMTP_HOST`/`SMTP_PORT`/`SMTP_USER`/`SMTP_PASS` | — | Ops alert email transport |
+| `OPS_ALERT_EMAIL_TO` | `edpickerteam@gmail.com` | Failure/limited-evidence alert inbox |
 | `CRAWLER_API_BASE_URL` | `http://localhost:3000` | API base for workers |
+| `CRAWL_ALL_API_BASE_URL` | `http://localhost:3000` | API base used by `crawl-all-website` job |
+| `CRAWL_ALL_CONCURRENCY` | `5` | Parallel API enqueue workers for bulk crawl |
+| `CRAWL_ALL_LIMIT` | `0` | Max schools to enqueue (`0` = all) |
+| `CRAWL_ALL_INCLUDE_ANALYSED` | `0` | `1` to include schools already marked `analysed` |
+| `CRAWL_ALL_DRY_RUN` | `0` | `1` to list/process selection without enqueueing scans |
 | `B2B_CTA_URL` | `https://edpicker.com/verify` | B2B verification landing page |
+| `ANALYTICS_PASSWORD` | `123456` | Password required by `/analytics` page and `/api/analytics/overview` |
 | `STORAGE_PROVIDER` | `s3` | `s3` or `azure` |
 | `S3_ENDPOINT` | `http://localhost:9000` | MinIO/S3 endpoint |
 | `AZURE_STORAGE_CONNECTION_STRING` | — | Azure Blob (when provider=azure) |
@@ -145,5 +196,7 @@ Migrations live in `sql/migrations/` and are numbered sequentially:
 - `004_compare_lists.sql` - Adds compare list tables
 - `005_schools_registry.sql` - Adds permanent schools table and per-field merge metadata
 - `006_mandatory_documents.sql` - Adds mandatory document audit table with expiry/details/review status per school
+- `008_ai_audit.sql` - Adds async AI audit status/log tables
+- `009_paid_reports_v1.sql` - Adds paid report sessions, model token metrics, step telemetry, admin PIN/access code
 
 Apply with: `psql $DATABASE_URL -f sql/migrations/001_scoring_v2.sql`

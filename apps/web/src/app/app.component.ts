@@ -13,6 +13,7 @@ import { ScanInputComponent } from './components/scan-input.component';
 import { ScanProgressComponent } from './components/scan-progress.component';
 import { SchoolIdentityComponent } from './components/school-identity.component';
 import { SchoolAdminComponent } from './components/school-admin.component';
+import { AnalyticsPageComponent } from './components/analytics-page.component';
 
 import { CompareService } from './services/compare.service';
 import { CrashHandlerService } from './services/crash-handler.service';
@@ -36,10 +37,12 @@ import { SchoolIdentity, ScanResponse, ScanStatus, SSEEvent, RedFlagsResponse, R
     CrawlSummaryComponent,
     AskBoxComponent,
     SchoolAdminComponent,
+    AnalyticsPageComponent,
   ],
   template: `
+    <app-analytics-page *ngIf="isAnalyticsRoute"></app-analytics-page>
     <app-school-admin *ngIf="isSchoolAdminRoute"></app-school-admin>
-    <div class="shell" *ngIf="!isSchoolAdminRoute">
+    <div class="shell" *ngIf="!isSchoolAdminRoute && !isAnalyticsRoute">
       <!-- Header Nav: Home + Compare + Add School -->
       <header class="topbar">
         <div class="topbar-inner">
@@ -51,6 +54,7 @@ import { SchoolIdentity, ScanResponse, ScanStatus, SSEEvent, RedFlagsResponse, R
               Compare ({{ filledCount }}/3)
             </button>
             <a class="nav-btn" href="/schooladmin">School Admin</a>
+            <a class="nav-btn" href="/analytics">Analytics</a>
             <button class="primary-btn" (click)="startAddToCompare()" [disabled]="!hasFreeSlot">
               Add school to compare
             </button>
@@ -964,6 +968,8 @@ export class AppComponent implements OnInit, OnDestroy {
   activeView: 'home' | 'compare' = 'home';
   readonly isSchoolAdminRoute = typeof window !== 'undefined'
     && window.location.pathname.toLowerCase().startsWith('/schooladmin');
+  readonly isAnalyticsRoute = typeof window !== 'undefined'
+    && window.location.pathname.toLowerCase().startsWith('/analytics');
 
   compareListId = '';
 

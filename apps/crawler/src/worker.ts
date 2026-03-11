@@ -18,6 +18,7 @@ import axios from 'axios';
 import { Queue, Worker } from 'bullmq';
 import http from 'node:http';
 import { Redis as IORedisClient } from 'ioredis';
+import { readFile } from 'node:fs/promises';
 
 import {
   canonicalizeUrl, shouldSkipUrl, classifyUrlTier,
@@ -91,12 +92,22 @@ const internalApiKey = process.env.INTERNAL_API_KEY ?? 'change-me';
 const openAiApiKey = process.env.OPENAI_API_KEY ?? '';
 const openAiBaseUrl = process.env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1';
 const scoringModel = process.env.OPENAI_MODEL_SCORING ?? 'gpt-4o-mini';
+const openAiModelPaid = process.env.OPENAI_MODEL_PAID_REPORT ?? 'gpt-4o';
 const geminiApiKey = process.env.GEMINI_API_KEY ?? '';
 const geminiModelScoring = process.env.GEMINI_MODEL_SCORING ?? 'gemini-1.5-flash-8b';
 const geminiModelAudit = process.env.GEMINI_MODEL_AUDIT ?? 'gemini-1.5-flash-8b';
+const geminiModelPaid = process.env.GEMINI_MODEL_PAID_REPORT ?? 'gemini-1.5-pro';
+const claudeApiKey = process.env.CLAUDE_API_KEY ?? '';
+const claudeModelPaid = process.env.CLAUDE_MODEL_PAID_REPORT ?? 'claude-sonnet-4-20250514';
+const grokApiKey = process.env.GROK_API_KEY ?? process.env.X_API_KEY ?? '';
+const grokBaseUrl = process.env.GROK_BASE_URL ?? 'https://api.x.ai/v1';
+const grokModelPaid = process.env.GROK_MODEL_PAID_REPORT ?? 'grok-3-mini';
 const classifyQueueName = process.env.CLASSIFY_QUEUE_NAME || 'schoollens-classify';
 const crawlQueueName = process.env.CRAWLER_QUEUE_NAME || 'schoollens-crawl';
 const scoringQueueName = process.env.SCORING_QUEUE_NAME || 'schoollens-score';
+const paidReportQueueName = process.env.PAID_REPORT_QUEUE_NAME || 'schoollens-paid-report';
+const paidReportQueueConcurrency = Number(process.env.PAID_REPORT_QUEUE_CONCURRENCY ?? 2);
+const paidReportTimeoutMs = Number(process.env.PAID_REPORT_TIMEOUT_MS ?? 1_800_000);
 
 const PLAYWRIGHT_HARD_BUDGET = Number(process.env.PLAYWRIGHT_BUDGET ?? 5);
 const PLAYWRIGHT_ENABLED = process.env.PLAYWRIGHT_ENABLED
@@ -437,6 +448,283 @@ async function callAiJson(
   if (geminiResult) return { provider: 'gemini', result: geminiResult };
 
   return { provider: null, result: null };
+}
+
+function estimateTokenCount(text: string): number {
+  if (!text) return 0;
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+type PaidModelRun = {
+  provider: 'openai' | 'gemini' | 'claude' | 'grok';
+  model: string;
+  durationMs: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
+  content: Record<string, unknown> | null;
+  errorMessage: string | null;
+};
+
+async function callOpenAiJsonWithMeta(systemPrompt: string, userPrompt: string, model: string, maxTokens = 4000): Promise<PaidModelRun> {
+  const startedAt = Date.now();
+  if (!openAiApiKey) {
+    return {
+      provider: 'openai',
+      model,
+      durationMs: 0,
+      inputTokens: null,
+      outputTokens: null,
+      totalTokens: null,
+      content: null,
+      errorMessage: 'OPENAI_API_KEY is not configured',
+    };
+  }
+  try {
+    const res = await axios.post(
+      `${openAiBaseUrl.replace(/\/+$/, '')}/chat/completions`,
+      {
+        model,
+        temperature: 0,
+        max_tokens: maxTokens,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${openAiApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 120_000,
+      },
+    );
+    const contentRaw = res.data?.choices?.[0]?.message?.content;
+    const content = typeof contentRaw === 'string' ? parseJsonObjectFromText(contentRaw) : null;
+    const usage = res.data?.usage || {};
+    const inputTokens = Number.isFinite(usage.prompt_tokens) ? Number(usage.prompt_tokens) : estimateTokenCount(`${systemPrompt}\n${userPrompt}`);
+    const outputTokens = Number.isFinite(usage.completion_tokens) ? Number(usage.completion_tokens) : estimateTokenCount(contentRaw || '');
+    const totalTokens = Number.isFinite(usage.total_tokens) ? Number(usage.total_tokens) : inputTokens + outputTokens;
+    return {
+      provider: 'openai',
+      model,
+      durationMs: Date.now() - startedAt,
+      inputTokens,
+      outputTokens,
+      totalTokens,
+      content,
+      errorMessage: content ? null : 'OpenAI returned empty or invalid JSON',
+    };
+  } catch (err) {
+    return {
+      provider: 'openai',
+      model,
+      durationMs: Date.now() - startedAt,
+      inputTokens: null,
+      outputTokens: null,
+      totalTokens: null,
+      content: null,
+      errorMessage: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+async function callGeminiJsonWithMeta(systemPrompt: string, userPrompt: string, model: string): Promise<PaidModelRun> {
+  const startedAt = Date.now();
+  if (!geminiApiKey) {
+    return {
+      provider: 'gemini',
+      model,
+      durationMs: 0,
+      inputTokens: null,
+      outputTokens: null,
+      totalTokens: null,
+      content: null,
+      errorMessage: 'GEMINI_API_KEY is not configured',
+    };
+  }
+  try {
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(geminiApiKey)}`;
+    const res = await axios.post(
+      endpoint,
+      {
+        generationConfig: {
+          temperature: 0,
+          responseMimeType: 'application/json',
+        },
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }],
+          },
+        ],
+      },
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 120_000,
+      },
+    );
+    const text = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const content = typeof text === 'string' ? parseJsonObjectFromText(text) : null;
+    const usage = res.data?.usageMetadata || {};
+    const inputTokens = Number.isFinite(usage.promptTokenCount) ? Number(usage.promptTokenCount) : estimateTokenCount(`${systemPrompt}\n${userPrompt}`);
+    const outputTokens = Number.isFinite(usage.candidatesTokenCount) ? Number(usage.candidatesTokenCount) : estimateTokenCount(text || '');
+    const totalTokens = Number.isFinite(usage.totalTokenCount) ? Number(usage.totalTokenCount) : inputTokens + outputTokens;
+    return {
+      provider: 'gemini',
+      model,
+      durationMs: Date.now() - startedAt,
+      inputTokens,
+      outputTokens,
+      totalTokens,
+      content,
+      errorMessage: content ? null : 'Gemini returned empty or invalid JSON',
+    };
+  } catch (err) {
+    return {
+      provider: 'gemini',
+      model,
+      durationMs: Date.now() - startedAt,
+      inputTokens: null,
+      outputTokens: null,
+      totalTokens: null,
+      content: null,
+      errorMessage: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+async function callClaudeJsonWithMeta(systemPrompt: string, userPrompt: string, model: string, maxTokens = 4000): Promise<PaidModelRun> {
+  const startedAt = Date.now();
+  if (!claudeApiKey) {
+    return {
+      provider: 'claude',
+      model,
+      durationMs: 0,
+      inputTokens: null,
+      outputTokens: null,
+      totalTokens: null,
+      content: null,
+      errorMessage: 'CLAUDE_API_KEY is not configured',
+    };
+  }
+  try {
+    const res = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      {
+        model,
+        max_tokens: maxTokens,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userPrompt }],
+      },
+      {
+        headers: {
+          'x-api-key': claudeApiKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        timeout: 120_000,
+      },
+    );
+    const text = res.data?.content?.find((p: { type?: string; text?: string }) => p?.type === 'text')?.text;
+    const content = typeof text === 'string' ? parseJsonObjectFromText(text) : null;
+    const usage = res.data?.usage || {};
+    const inputTokens = Number.isFinite(usage.input_tokens) ? Number(usage.input_tokens) : estimateTokenCount(`${systemPrompt}\n${userPrompt}`);
+    const outputTokens = Number.isFinite(usage.output_tokens) ? Number(usage.output_tokens) : estimateTokenCount(text || '');
+    const totalTokens = inputTokens + outputTokens;
+    return {
+      provider: 'claude',
+      model,
+      durationMs: Date.now() - startedAt,
+      inputTokens,
+      outputTokens,
+      totalTokens,
+      content,
+      errorMessage: content ? null : 'Claude returned empty or invalid JSON',
+    };
+  } catch (err) {
+    return {
+      provider: 'claude',
+      model,
+      durationMs: Date.now() - startedAt,
+      inputTokens: null,
+      outputTokens: null,
+      totalTokens: null,
+      content: null,
+      errorMessage: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+async function callGrokJsonWithMeta(systemPrompt: string, userPrompt: string, model: string, maxTokens = 4000): Promise<PaidModelRun> {
+  const startedAt = Date.now();
+  if (!grokApiKey) {
+    return {
+      provider: 'grok',
+      model,
+      durationMs: 0,
+      inputTokens: null,
+      outputTokens: null,
+      totalTokens: null,
+      content: null,
+      errorMessage: 'GROK_API_KEY is not configured',
+    };
+  }
+  try {
+    const res = await axios.post(
+      `${grokBaseUrl.replace(/\/+$/, '')}/chat/completions`,
+      {
+        model,
+        temperature: 0,
+        max_tokens: maxTokens,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${grokApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 120_000,
+      },
+    );
+    const text = res.data?.choices?.[0]?.message?.content;
+    const content = typeof text === 'string' ? parseJsonObjectFromText(text) : null;
+    const usage = res.data?.usage || {};
+    const inputTokens = Number.isFinite(usage.prompt_tokens) ? Number(usage.prompt_tokens) : estimateTokenCount(`${systemPrompt}\n${userPrompt}`);
+    const outputTokens = Number.isFinite(usage.completion_tokens) ? Number(usage.completion_tokens) : estimateTokenCount(text || '');
+    const totalTokens = Number.isFinite(usage.total_tokens) ? Number(usage.total_tokens) : inputTokens + outputTokens;
+    return {
+      provider: 'grok',
+      model,
+      durationMs: Date.now() - startedAt,
+      inputTokens,
+      outputTokens,
+      totalTokens,
+      content,
+      errorMessage: content ? null : 'Grok returned empty or invalid JSON',
+    };
+  } catch (err) {
+    return {
+      provider: 'grok',
+      model,
+      durationMs: Date.now() - startedAt,
+      inputTokens: null,
+      outputTokens: null,
+      totalTokens: null,
+      content: null,
+      errorMessage: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+function isTerminalScanStatus(status: string | undefined): boolean {
+  return status === 'Ready' || status === 'Rejected' || status === 'Uncertain' || status === 'Failed' || status === 'Error';
 }
 
 function hasMenuNoisePrincipalText(candidateRaw: string): boolean {
@@ -2143,8 +2431,264 @@ const scoringWorker = new Worker(
   { connection: redisConnection },
 );
 
+async function postPaidStep(payload: {
+  reportSessionId: string;
+  stepName: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+  attemptNo?: number;
+  startedAt?: string;
+  endedAt?: string;
+  durationMs?: number;
+  details?: Record<string, unknown>;
+}): Promise<void> {
+  await post('/internal/paid-report/step', payload, 20_000);
+}
+
+async function postPaidModelRun(payload: {
+  reportSessionId: string;
+  layerName: string;
+  provider: string;
+  model: string;
+  status: 'completed' | 'failed' | 'fallback_used' | 'skipped';
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  totalTokens?: number | null;
+  durationMs?: number | null;
+  errorMessage?: string | null;
+  requestMeta?: Record<string, unknown>;
+}): Promise<void> {
+  await post('/internal/paid-report/model-run', payload, 20_000);
+}
+
+const paidReportWorker = new Worker(
+  paidReportQueueName,
+  async (job) => {
+    const startedAt = Date.now();
+    const { reportSessionId, schoolId, websiteUrl } = job.data as {
+      reportSessionId: string;
+      schoolId: string;
+      websiteUrl: string;
+      startedBy?: string;
+    };
+
+    const runWithStep = async <T>(
+      stepName: string,
+      fn: () => Promise<T>,
+    ): Promise<T> => {
+      const stepStartedAt = new Date().toISOString();
+      const start = Date.now();
+      await postPaidStep({ reportSessionId, stepName, status: 'running', startedAt: stepStartedAt });
+      try {
+        const out = await fn();
+        await postPaidStep({
+          reportSessionId,
+          stepName,
+          status: 'completed',
+          startedAt: stepStartedAt,
+          endedAt: new Date().toISOString(),
+          durationMs: Date.now() - start,
+        });
+        return out;
+      } catch (error) {
+        await postPaidStep({
+          reportSessionId,
+          stepName,
+          status: 'failed',
+          startedAt: stepStartedAt,
+          endedAt: new Date().toISOString(),
+          durationMs: Date.now() - start,
+          details: { error: error instanceof Error ? error.message : String(error) },
+        });
+        throw error;
+      }
+    };
+
+    try {
+      const preflightData = await runWithStep('preflight', async () => {
+        const response = await axios.post(
+          `${apiBaseUrl}/api/admin/paid-reports/preflight`,
+          { schoolId },
+          { timeout: 20_000 },
+        );
+        if (!response.data?.ok) throw new Error('Preflight failed in worker execution');
+        return response.data as Record<string, unknown>;
+      });
+
+      const recrawl = await runWithStep('fresh_recrawl', async () => {
+        const scanRes = await axios.post(
+          `${apiBaseUrl}/api/scan`,
+          { url: websiteUrl },
+          { timeout: 20_000 },
+        );
+        const sessionId = scanRes.data?.sessionId as string | undefined;
+        if (!sessionId) throw new Error('Could not create fresh scan session');
+
+        const pollStarted = Date.now();
+        while (Date.now() - pollStarted < paidReportTimeoutMs) {
+          await new Promise((resolve) => setTimeout(resolve, 2500));
+          const statusRes = await axios.get(`${apiBaseUrl}/api/scan/${sessionId}`, { timeout: 20_000 });
+          const status = statusRes.data?.status as string | undefined;
+          if (isTerminalScanStatus(status)) {
+            if (status !== 'Ready') throw new Error(`Fresh recrawl ended with non-ready status: ${status}`);
+            return {
+              analysisSessionId: sessionId,
+              scan: statusRes.data,
+            };
+          }
+        }
+        throw new Error('Fresh recrawl timed out while waiting for terminal status');
+      });
+
+      const context = await runWithStep('collect_context', async () => {
+        const response = await axios.post(
+          `${apiBaseUrl}/internal/paid-report/context`,
+          { reportSessionId, schoolId, analysisSessionId: recrawl.analysisSessionId },
+          {
+            timeout: 30_000,
+            headers: { 'X-Internal-Key': internalApiKey },
+          },
+        );
+        return response.data as Record<string, unknown>;
+      });
+
+      const rulesText = await readFile('src/fullpaid_report_rules/current_rules_full_paid.md', 'utf8')
+        .catch(() => 'Use evidence-backed, structured JSON reasoning. Keep 14 categories and confidence levels.');
+
+      const reasoningStartedAt = Date.now();
+      const crawlData = (context.crawlData || {}) as Record<string, unknown>;
+      const socialData = (context.socialData || {}) as Record<string, unknown>;
+      const googleReviewsData = (context.googleReviewsData || {}) as Record<string, unknown>;
+      const previousReport = (context.previousReport || {}) as Record<string, unknown>;
+
+      const layer1 = await runWithStep('layer1_openai', async () => {
+        const prompt = `Rules:\n${rulesText}\n\nInput crawl_data JSON:\n${JSON.stringify({ ...crawlData, previous_report: previousReport }).slice(0, 200000)}`;
+        let run = await callOpenAiJsonWithMeta('Return strict JSON for Layer 1 findings only.', prompt, openAiModelPaid, 3500);
+        let status: 'completed' | 'failed' | 'fallback_used' = run.content ? 'completed' : 'failed';
+        if (!run.content) {
+          const fallback = await callGrokJsonWithMeta('Return strict JSON for Layer 1 findings only.', prompt, grokModelPaid, 3500);
+          if (fallback.content) {
+            run = fallback;
+            status = 'fallback_used';
+          }
+        }
+        await postPaidModelRun({
+          reportSessionId,
+          layerName: 'layer1',
+          provider: run.provider,
+          model: run.model,
+          status,
+          inputTokens: run.inputTokens,
+          outputTokens: run.outputTokens,
+          totalTokens: run.totalTokens,
+          durationMs: run.durationMs,
+          errorMessage: run.errorMessage,
+        });
+        if (!run.content) throw new Error(run.errorMessage || 'Layer 1 failed');
+        return run.content;
+      });
+
+      const layer2 = await runWithStep('layer2_gemini', async () => {
+        const prompt = `Rules:\n${rulesText}\n\nCrawl data:\n${JSON.stringify(crawlData).slice(0, 160000)}\n\nOpenAI reasoning:\n${JSON.stringify(layer1).slice(0, 120000)}\n\nSocial:\n${JSON.stringify(socialData).slice(0, 30000)}\n\nGoogle reviews:\n${JSON.stringify(googleReviewsData).slice(0, 30000)}`;
+        let run = await callGeminiJsonWithMeta('Validate layer1, add misses, and output strict JSON only.', prompt, geminiModelPaid);
+        let status: 'completed' | 'failed' | 'fallback_used' = run.content ? 'completed' : 'failed';
+        if (!run.content) {
+          const fallback = await callGrokJsonWithMeta('Validate layer1, add misses, and output strict JSON only.', prompt, grokModelPaid, 3000);
+          if (fallback.content) {
+            run = fallback;
+            status = 'fallback_used';
+          }
+        }
+        await postPaidModelRun({
+          reportSessionId,
+          layerName: 'layer2',
+          provider: run.provider,
+          model: run.model,
+          status,
+          inputTokens: run.inputTokens,
+          outputTokens: run.outputTokens,
+          totalTokens: run.totalTokens,
+          durationMs: run.durationMs,
+          errorMessage: run.errorMessage,
+        });
+        if (!run.content) throw new Error(run.errorMessage || 'Layer 2 failed');
+        return run.content;
+      });
+
+      const layer3 = await runWithStep('layer3_claude', async () => {
+        const prompt = `Rules:\n${rulesText}\n\nCrawl data:\n${JSON.stringify(crawlData).slice(0, 120000)}\n\nOpenAI layer:\n${JSON.stringify(layer1).slice(0, 100000)}\n\nGemini layer:\n${JSON.stringify(layer2).slice(0, 100000)}\n\nSocial:\n${JSON.stringify(socialData).slice(0, 30000)}\n\nGoogle reviews:\n${JSON.stringify(googleReviewsData).slice(0, 30000)}\n\nReturn final_audit JSON.`;
+        let run = await callClaudeJsonWithMeta('Synthesize final audit JSON with confidence and conflicts.', prompt, claudeModelPaid, 3500);
+        let status: 'completed' | 'failed' | 'fallback_used' = run.content ? 'completed' : 'failed';
+        if (!run.content) {
+          const fallback = await callGrokJsonWithMeta('Synthesize final audit JSON with confidence and conflicts.', prompt, grokModelPaid, 3500);
+          if (fallback.content) {
+            run = fallback;
+            status = 'fallback_used';
+          }
+        }
+        await postPaidModelRun({
+          reportSessionId,
+          layerName: 'layer3',
+          provider: run.provider,
+          model: run.model,
+          status,
+          inputTokens: run.inputTokens,
+          outputTokens: run.outputTokens,
+          totalTokens: run.totalTokens,
+          durationMs: run.durationMs,
+          errorMessage: run.errorMessage,
+        });
+        if (!run.content) throw new Error(run.errorMessage || 'Layer 3 failed');
+        return run.content;
+      });
+
+      const reasoningRuntimeMs = Date.now() - reasoningStartedAt;
+      await runWithStep('finalize', async () => {
+        const finalAny = layer3 as Record<string, unknown>;
+        const summaryObj = (finalAny.summary && typeof finalAny.summary === 'object')
+          ? finalAny.summary as Record<string, unknown>
+          : null;
+        const overallScore = typeof finalAny.overall_score === 'number'
+          ? Number(finalAny.overall_score)
+          : (summaryObj && typeof summaryObj.overall_score === 'number')
+            ? Number(summaryObj.overall_score)
+            : null;
+        await post('/internal/paid-report/finalize', {
+          reportSessionId,
+          analysisSessionId: recrawl.analysisSessionId,
+          crawlData,
+          socialData,
+          googleReviewsData,
+          openaiJson: layer1,
+          geminiJson: layer2,
+          claudeJson: layer3,
+          finalAuditJson: layer3,
+          overallScore,
+          limitedEvidence: false,
+          totalRuntimeMs: Date.now() - startedAt,
+          reasoningRuntimeMs,
+          queueWaitMs: 0,
+        }, 30_000);
+      });
+
+      return { ok: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await post('/internal/paid-report/fail', {
+        reportSessionId,
+        errorMessage: message,
+      }, 20_000).catch(() => {});
+      throw error;
+    }
+  },
+  {
+    connection: redisConnection,
+    concurrency: Math.max(1, paidReportQueueConcurrency),
+  },
+);
+
 const classifyQueue = new Queue(classifyQueueName, { connection: redisConnection });
 const crawlQueue = new Queue(crawlQueueName, { connection: redisConnection });
+const paidReportQueue = new Queue(paidReportQueueName, { connection: redisConnection });
 const bridgeClients: IORedisClient[] = [];
 let bridgeStopRequested = false;
 
@@ -2206,6 +2750,8 @@ crawlWorker.on('completed', (job) => console.log(`✓ Crawl: ${job.id}`));
 crawlWorker.on('failed', (job, err) => console.error(`✗ Crawl: ${job?.id}`, err));
 scoringWorker.on('completed', (job) => console.log(`✓ Score: ${job.id}`));
 scoringWorker.on('failed', (job, err) => console.error(`✗ Score: ${job?.id}`, err));
+paidReportWorker.on('completed', (job) => console.log(`✓ Paid report: ${job.id}`));
+paidReportWorker.on('failed', (job, err) => console.error(`✗ Paid report: ${job?.id}`, err));
 
 async function gracefulShutdown() {
   console.log('Shutting down workers...');
@@ -2215,8 +2761,10 @@ async function gracefulShutdown() {
     classifyWorker.close(),
     crawlWorker.close(),
     scoringWorker.close(),
+    paidReportWorker.close(),
     classifyQueue.close(),
     crawlQueue.close(),
+    paidReportQueue.close(),
     closePlaywrightBrowser(),
     closeSseClient(),
   ]);
@@ -2226,7 +2774,7 @@ async function gracefulShutdown() {
 process.on('SIGINT', gracefulShutdown);
 process.on('SIGTERM', gracefulShutdown);
 
-console.log('Workers V2 started (classify + crawl + score) — Cheerio-first with SSE streaming');
+console.log('Workers V2 started (classify + crawl + score + paid-report) — Cheerio-first with SSE streaming');
 void startLegacyListBridge(classifyQueueName, classifyQueue);
 void startLegacyListBridge(crawlQueueName, crawlQueue);
 void runStartupDiagnostics();

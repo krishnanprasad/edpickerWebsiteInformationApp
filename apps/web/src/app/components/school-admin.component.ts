@@ -2,10 +2,10 @@ import { CommonModule } from '@angular/common';
 import { Component, inject } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { catchError, forkJoin, last, Observable, of, switchMap } from 'rxjs';
-import { ScanResponse } from '../models/scan.models';
+import { ScanResponse, SchoolInfoCoreResponse } from '../models/scan.models';
 import { ScanService } from '../services/scan.service';
 
-type AdminPanel = 'parents' | 'cbse' | 'competitors';
+type AdminPanel = 'parents' | 'core' | 'cbse' | 'competitors';
 type ParentCategoryKey = 'academic' | 'safety' | 'parent' | 'holistic' | 'practical';
 
 interface ParentQuestionRule {
@@ -114,12 +114,16 @@ const PRACTICAL_RULES: ParentQuestionRule[] = [
             <span class="btn-inner" [style.opacity]="loading && activePanel === 'parents' ? 0 : 1">1. Parents Information Score</span>
             <span class="five-dots" *ngIf="loading && activePanel === 'parents'" aria-hidden="true"><span></span><span></span><span></span></span>
           </button>
+          <button class="btn btn-core" [class.btn-loading]="loading && activePanel === 'core'" (click)="runSchoolInfoCoreReport()" [disabled]="loading">
+            <span class="btn-inner" [style.opacity]="loading && activePanel === 'core' ? 0 : 1">2. School Information Core</span>
+            <span class="five-dots" *ngIf="loading && activePanel === 'core'" aria-hidden="true"><span></span><span></span><span></span></span>
+          </button>
           <button class="btn btn-cbse" [class.btn-loading]="loading && activePanel === 'cbse'" (click)="runCbseComplianceReport()" [disabled]="loading">
-            <span class="btn-inner" [style.opacity]="loading && activePanel === 'cbse' ? 0 : 1">2. CBSE Compliance Report</span>
+            <span class="btn-inner" [style.opacity]="loading && activePanel === 'cbse' ? 0 : 1">3. CBSE Compliance Report</span>
             <span class="five-dots" *ngIf="loading && activePanel === 'cbse'" aria-hidden="true"><span></span><span></span><span></span></span>
           </button>
           <button class="btn btn-compare" (click)="activateCompetitorPanel()">
-            3. Competitor Comparison
+            4. Competitor Comparison
           </button>
         </div>
 
@@ -175,6 +179,57 @@ const PRACTICAL_RULES: ParentQuestionRule[] = [
             </div>
           </div>
         </div>
+      </section>
+
+      <section class="panel" *ngIf="activePanel === 'core' && latestScan">
+        <h2>School Information Core</h2>
+        <p class="sub">10 categories from current paid rules. Each category is scored on a strict 0-3 scale.</p>
+        <div class="loading-panel" *ngIf="coreLoading">
+          <div class="skel-row" *ngFor="let _ of [0,1,2]">
+            <div class="skel-badge"></div>
+            <div class="skel-lines"><div class="skel-line long"></div><div class="skel-line short"></div></div>
+          </div>
+        </div>
+        <ng-container *ngIf="!coreLoading && coreReport">
+          <div class="score-grid">
+            <div class="score-box">
+              <div class="score-label">Core Score</div>
+              <div class="score-value">{{ coreReport.totalScore }}/{{ coreReport.maxScore }}</div>
+            </div>
+            <div class="score-box">
+              <div class="score-label">Percent</div>
+              <div class="score-value">{{ coreReport.percent }}%</div>
+            </div>
+            <div class="score-box">
+              <div class="score-label">Band</div>
+              <div class="score-value">{{ coreReport.label }}</div>
+            </div>
+          </div>
+          <p class="sub" style="margin-top:10px;">{{ coreReport.summary }}</p>
+          <table class="report-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Category</th>
+                <th>Score (0-3)</th>
+                <th>Status</th>
+                <th>Reason</th>
+                <th>Evidence</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr *ngFor="let c of coreReport.categories">
+                <td>{{ c.categoryNumber }}</td>
+                <td>{{ c.categoryName }}</td>
+                <td>{{ c.score }}</td>
+                <td><span class="pill" [class.present]="c.status === 'strong_found'" [class.review]="c.status === 'partial' || c.status === 'weak_found'" [class.missing]="c.status === 'missing'">{{ coreStatusLabel(c.status) }}</span></td>
+                <td>{{ c.reason }}</td>
+                <td>{{ c.evidence }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="sub" style="margin-top:10px;">Model used: {{ coreReport.providerUsed }}{{ coreReport.fromCache ? ' (cached)' : '' }}</p>
+        </ng-container>
       </section>
 
       <section class="panel" *ngIf="activePanel === 'cbse' && latestScan">
@@ -272,12 +327,13 @@ const PRACTICAL_RULES: ParentQuestionRule[] = [
     .input-card, .panel { background: #fff; border: 1px solid #d8e2ec; border-radius: 14px; padding: 16px; margin-top: 14px; }
     label { display: block; font-weight: 600; margin-bottom: 8px; }
     input { width: 100%; box-sizing: border-box; border: 1px solid #b9c9d8; border-radius: 10px; padding: 10px 12px; font-size: 14px; }
-    .btn-row { margin-top: 12px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .btn-row { margin-top: 12px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
     .btn { border: 0; border-radius: 10px; padding: 10px 12px; font-weight: 700; color: #fff; cursor: pointer; position: relative; min-height: 40px; }
     .btn:disabled { opacity: 0.7; cursor: not-allowed; }
     .btn-loading { box-shadow: 0 0 0 1.5px rgba(255,255,255,0.5) inset; }
     .btn-inner { transition: opacity 0.15s; }
     .btn-parents { background: #0f766e; }
+    .btn-core { background: #0e7490; }
     .btn-cbse { background: #1d4ed8; }
     .btn-compare { background: #b45309; margin-top: 12px; }
     .error { color: #b91c1c; margin-top: 10px; }
@@ -337,8 +393,10 @@ export class SchoolAdminComponent {
   activePanel: AdminPanel = 'parents';
   loading = false;
   compareLoading = false;
+  coreLoading = false;
   error = '';
   latestScan: ScanResponse | null = null;
+  coreReport: SchoolInfoCoreResponse | null = null;
 
   competitorUrls = ['', '', ''];
   competitorResults: ScanResponse[] = [];
@@ -350,6 +408,11 @@ export class SchoolAdminComponent {
 
   runCbseComplianceReport() {
     this.activePanel = 'cbse';
+    this.runPrimaryScan();
+  }
+
+  runSchoolInfoCoreReport() {
+    this.activePanel = 'core';
     this.runPrimaryScan();
   }
 
@@ -423,6 +486,23 @@ export class SchoolAdminComponent {
     this.scanToTerminal(normalizedUrl).subscribe({
       next: (scan) => {
         this.latestScan = scan;
+        if (this.activePanel === 'core' && scan.status === 'Ready') {
+          this.coreLoading = true;
+          this.scanService.getSchoolInfoCore(scan.sessionId).subscribe({
+            next: (core) => {
+              this.coreReport = core;
+              this.coreLoading = false;
+              this.loading = false;
+            },
+            error: () => {
+              this.error = 'Could not generate School Information Core report.';
+              this.coreReport = null;
+              this.coreLoading = false;
+              this.loading = false;
+            },
+          });
+          return;
+        }
         this.loading = false;
       },
       error: () => {
@@ -495,5 +575,12 @@ export class SchoolAdminComponent {
   hasUnreachableLinks(scan: ScanResponse): boolean {
     const docs = scan.mandatoryDocuments || [];
     return docs.some((d) => /not reachable/i.test(d.reviewMessage || ''));
+  }
+
+  coreStatusLabel(status: 'missing' | 'partial' | 'weak_found' | 'strong_found'): string {
+    if (status === 'strong_found') return 'Strong Found';
+    if (status === 'weak_found') return 'Weak Found';
+    if (status === 'partial') return 'Partial';
+    return 'Missing';
   }
 }

@@ -5,6 +5,7 @@ import express from 'express';
 import { Queue } from 'bullmq';
 import { z } from 'zod';
 import OpenAI from 'openai';
+import axios from 'axios';
 import { pgPool, redis } from './db.js';
 import { FileStorageService } from './storage.js';
 
@@ -36,6 +37,7 @@ const connection = {
 const classifyQueue = new Queue(process.env.CLASSIFY_QUEUE_NAME || 'schoollens-classify', { connection });
 const crawlQueue = new Queue(process.env.CRAWLER_QUEUE_NAME || 'schoollens-crawl', { connection });
 const scoringQueue = new Queue(process.env.SCORING_QUEUE_NAME || 'schoollens-score', { connection });
+const paidReportQueue = new Queue(process.env.PAID_REPORT_QUEUE_NAME || 'schoollens-paid-report', { connection });
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || 'missing-key' });
 
@@ -63,12 +65,44 @@ const inputUrlSchema = z.string()
 
 const scanSchema = z.object({ url: inputUrlSchema });
 const questionSchema = z.object({ question: z.string().min(3) });
+const analyticsAccessSchema = z.object({ password: z.string().min(1) });
+const schoolSearchQuerySchema = z.object({ q: z.string().min(1).max(120) });
 const compareListIdSchema = z.object({ compareListId: z.string().uuid() });
 const compareListAddSchema = z.object({
   url: inputUrlSchema,
   staleAction: z.enum(['add_anyway', 'refresh']).optional(),
 });
 const refreshSchema = z.object({});
+const adminPinVerifySchema = z.object({
+  pin: z.string().regex(/^\d{6}$/),
+});
+const paidReportPreflightSchema = z.object({
+  schoolId: z.string().uuid(),
+});
+const paidReportCreateSchema = z.object({
+  schoolId: z.string().uuid(),
+  adminName: z.string().min(2).max(120),
+  pin: z.string().regex(/^\d{6}$/),
+});
+const paidReportActionSchema = z.object({
+  adminName: z.string().min(2).max(120),
+});
+const paidReportCodeVerifySchema = z.object({
+  accessCode: z.string().regex(/^\d{8}$/),
+});
+
+const SCHOOL_INFO_CORE_CATEGORIES = [
+  'Parent Information & Fees',
+  'Safety & Security',
+  'Academic Transparency & Results',
+  'Staff Transparency & Ratios',
+  'Infrastructure & Facilities',
+  'Sports & Physical Education',
+  'Extra Curricular Activities',
+  'Achievements & Recognition',
+  'Transportation Details',
+  'Extra Coaching & Academic Support',
+] as const;
 
 function coerceHttpUrl(input: string): string {
   const trimmed = String(input || '').trim();
@@ -97,6 +131,63 @@ function hashUrl(url: string): string {
   return crypto.createHash('sha256').update(url).digest('hex');
 }
 
+function analyticsPassword(): string {
+  return process.env.ANALYTICS_PASSWORD || '123456';
+}
+
+function generateNumericCode(length: number): string {
+  const max = Math.pow(10, length);
+  const n = Math.floor(Math.random() * max);
+  return n.toString().padStart(length, '0');
+}
+
+function getRequestIp(req: express.Request): string | null {
+  const fwd = req.headers['x-forwarded-for'];
+  if (Array.isArray(fwd) && fwd.length > 0) return String(fwd[0]).split(',')[0].trim();
+  if (typeof fwd === 'string' && fwd.trim()) return fwd.split(',')[0].trim();
+  return req.ip || null;
+}
+
+async function ensureActiveAdminPin(): Promise<{ pin: string; expiresAt: Date }> {
+  const active = await pgPool.query<{ pin_code: string; expires_at: Date }>(
+    `SELECT pin_code, expires_at
+     FROM admin_runtime_pins
+     WHERE is_active = TRUE AND expires_at > NOW()
+     ORDER BY created_at DESC
+     LIMIT 1`,
+  );
+
+  if ((active.rowCount ?? 0) > 0) {
+    return { pin: active.rows[0].pin_code, expiresAt: active.rows[0].expires_at };
+  }
+
+  const pin = generateNumericCode(6);
+  const rotateMinutes = Number(process.env.ADMIN_GLOBAL_PIN_ROTATE_MINUTES || '60');
+  const expiresAt = new Date(Date.now() + rotateMinutes * 60_000);
+
+  await pgPool.query('UPDATE admin_runtime_pins SET is_active = FALSE WHERE is_active = TRUE');
+  await pgPool.query(
+    `INSERT INTO admin_runtime_pins(pin_code, expires_at, is_active)
+     VALUES($1, $2, TRUE)`,
+    [pin, expiresAt],
+  );
+
+  return { pin, expiresAt };
+}
+
+async function verifyActiveAdminPin(pin: string): Promise<boolean> {
+  const result = await pgPool.query(
+    `SELECT 1
+     FROM admin_runtime_pins
+     WHERE is_active = TRUE
+       AND pin_code = $1
+       AND expires_at > NOW()
+     LIMIT 1`,
+    [pin],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
 function requireInternalKey(req: express.Request, res: express.Response): boolean {
   const key = req.headers['x-internal-key'];
   if (!key || key !== process.env.INTERNAL_API_KEY) {
@@ -115,6 +206,40 @@ function computeStaleness(completedAt: Date | null, staleDays = 7): { isStale: b
   const ageMs = Date.now() - completedAt.getTime();
   const ageDays = Math.floor(ageMs / (1000 * 60 * 60 * 24));
   return { isStale: ageDays > staleDays, ageDays };
+}
+
+async function checkWebsiteLive(url: string): Promise<{ ok: boolean; reason: string | null; statusCode: number | null }> {
+  try {
+    const response = await axios.get(url, {
+      timeout: 8_000,
+      maxRedirects: 5,
+      validateStatus: () => true,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; SchoolLensPaidReport/1.0)',
+      },
+    });
+    const contentType = String(response.headers['content-type'] || '').toLowerCase();
+    const body = typeof response.data === 'string' ? response.data : '';
+    const statusCode = Number(response.status) || null;
+
+    const validStatus = response.status === 200 || response.status === 301;
+    const hasHtml = contentType.includes('text/html') || body.includes('<html');
+    const hasBody = body.replace(/\s+/g, ' ').trim().length >= 200;
+
+    if (validStatus && hasHtml && hasBody) return { ok: true, reason: null, statusCode };
+
+    return {
+      ok: false,
+      reason: `Website check failed (status=${response.status}, html=${hasHtml}, bodyLength=${body.length}).`,
+      statusCode,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `Website check error: ${error instanceof Error ? error.message : String(error)}`,
+      statusCode: null,
+    };
+  }
 }
 
 function safeHostnameLabel(url: string): string {
@@ -955,6 +1080,27 @@ function cleanExtractedText(text: string): string {
   return cleaned;
 }
 
+function parseJsonObjectFromText(input: string): Record<string, unknown> | null {
+  const trimmed = String(input || '').trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+  } catch {
+    const start = trimmed.indexOf('{');
+    const end = trimmed.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      try {
+        const parsed = JSON.parse(trimmed.slice(start, end + 1)) as unknown;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
 /**
  * Split combined crawl text into per-page chunks and rank by keyword
  * relevance to the user's question. Returns the most relevant chunks
@@ -1282,6 +1428,188 @@ RULES:
 
   res.setHeader('Cache-Control', 'no-store');
   return res.json(result);
+});
+
+/* ================================================================== */
+/*  GET /api/scan/:id/school-info-core — 10 categories, 0-3 each       */
+/* ================================================================== */
+
+app.get('/api/scan/:id/school-info-core', async (req, res) => {
+  const sessionId = req.params.id;
+  const cacheKey = `school-info-core:${sessionId}`;
+
+  const sessionRes = await pgPool.query<{ status: string; url: string }>(
+    'SELECT status, url FROM analysis_sessions WHERE id = $1',
+    [sessionId],
+  );
+  if (!sessionRes.rowCount) return res.status(404).json({ error: 'Session not found' });
+
+  const status = sessionRes.rows[0].status;
+  if (status !== 'Ready') {
+    return res.status(409).json({ error: `School Information Core is available only after scan is Ready. Current status: ${status}` });
+  }
+
+  try {
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      const parsed = parseJsonObjectFromText(cached);
+      if (parsed) return res.json({ ...parsed, fromCache: true });
+    }
+  } catch {
+    // Ignore cache parse errors
+  }
+
+  const pagesRes = await pgPool.query<{ page_url: string; title: string | null; extracted_text: string | null }>(
+    `SELECT page_url, title, extracted_text
+     FROM crawled_pages
+     WHERE session_id = $1
+     ORDER BY fetched_at ASC
+     LIMIT 220`,
+    [sessionId],
+  );
+
+  const textChunks = pagesRes.rows
+    .map((r) => `URL: ${r.page_url}\nTITLE: ${r.title || ''}\nTEXT: ${cleanExtractedText(r.extracted_text || '')}`)
+    .filter((t) => t.length > 40);
+  const crawlText = textChunks.join('\n\n---\n\n').slice(0, 120_000);
+
+  type CoreRow = {
+    categoryNumber: number;
+    categoryName: string;
+    score: number;
+    status: 'missing' | 'partial' | 'weak_found' | 'strong_found';
+    reason: string;
+    evidence: string;
+  };
+
+  const normalizeRows = (rowsRaw: unknown): CoreRow[] => {
+    const rows = Array.isArray(rowsRaw) ? rowsRaw : [];
+    return rows.slice(0, 10).map((row, idx) => {
+      const r = (row && typeof row === 'object') ? row as Record<string, unknown> : {};
+      const rawScore = Number(r.score);
+      const score = Number.isFinite(rawScore) ? Math.max(0, Math.min(3, Math.round(rawScore))) : 0;
+      const statusVal = String(r.status || '').toLowerCase();
+      const statusNormalized: CoreRow['status'] =
+        statusVal === 'strong_found' ? 'strong_found'
+          : statusVal === 'weak_found' ? 'weak_found'
+            : statusVal === 'partial' ? 'partial'
+              : 'missing';
+      return {
+        categoryNumber: Number(r.categoryNumber) || (idx + 1),
+        categoryName: String(r.categoryName || SCHOOL_INFO_CORE_CATEGORIES[idx] || `Category ${idx + 1}`),
+        score,
+        status: statusNormalized,
+        reason: cleanText(r.reason, 400) || 'Not enough evidence in crawl text for a stronger score.',
+        evidence: cleanText(r.evidence, 300) || '-',
+      };
+    });
+  };
+
+  const rulesHint = [
+    'Use current_rules_full_paid.md spirit for parent-facing strict scoring.',
+    'Use ONLY the provided crawl text; do not hallucinate.',
+    'Score mapping: 0=missing, 1=partial/unclear, 2=found but weak access (buried/pdf-only), 3=clearly found and parent-friendly.',
+    'Return strict JSON only.',
+  ].join('\n');
+
+  const outputSchemaHint = `{
+  "categories": [
+    { "categoryNumber": 1, "categoryName": "Parent Information & Fees", "score": 0, "status": "missing|partial|weak_found|strong_found", "reason": "string", "evidence": "string" }
+  ],
+  "summary": "string"
+}`;
+
+  const userPrompt = `Evaluate these exact 10 categories:\n${SCHOOL_INFO_CORE_CATEGORIES.map((c, i) => `${i + 1}. ${c}`).join('\n')}\n\nCrawl text:\n${crawlText}\n\nOutput JSON format:\n${outputSchemaHint}`;
+
+  let providerUsed: 'openai' | 'gemini' | 'none' = 'none';
+  let parsedResult: Record<string, unknown> | null = null;
+
+  if (process.env.OPENAI_API_KEY) {
+    try {
+      const completion = await openai.chat.completions.create({
+        model: process.env.OPENAI_MODEL_SCORING || 'gpt-4o-mini',
+        temperature: 0,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: rulesHint },
+          { role: 'user', content: userPrompt },
+        ],
+      });
+      const raw = completion.choices?.[0]?.message?.content || '';
+      parsedResult = parseJsonObjectFromText(raw);
+      if (parsedResult) providerUsed = 'openai';
+    } catch {
+      // Fallback below
+    }
+  }
+
+  if (!parsedResult && process.env.GEMINI_API_KEY) {
+    try {
+      const model = process.env.GEMINI_MODEL_AUDIT || 'gemini-1.5-flash-8b';
+      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`;
+      const geminiRes = await axios.post(
+        endpoint,
+        {
+          generationConfig: {
+            temperature: 0,
+            responseMimeType: 'application/json',
+          },
+          contents: [{
+            role: 'user',
+            parts: [{ text: `${rulesHint}\n\n${userPrompt}` }],
+          }],
+        },
+        {
+          headers: { 'Content-Type': 'application/json' },
+          timeout: 60_000,
+        },
+      );
+      const text = geminiRes.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      parsedResult = parseJsonObjectFromText(text);
+      if (parsedResult) providerUsed = 'gemini';
+    } catch {
+      // fall through
+    }
+  }
+
+  const normalizedRows = normalizeRows(parsedResult?.categories);
+  while (normalizedRows.length < 10) {
+    const idx = normalizedRows.length;
+    normalizedRows.push({
+      categoryNumber: idx + 1,
+      categoryName: SCHOOL_INFO_CORE_CATEGORIES[idx],
+      score: 0,
+      status: 'missing',
+      reason: 'Model response did not include this category.',
+      evidence: '-',
+    });
+  }
+
+  const totalScore = normalizedRows.reduce((sum, r) => sum + r.score, 0);
+  const maxScore = 30;
+  const percent = Math.round((totalScore / maxScore) * 100);
+  const label = percent >= 80 ? 'Strong' : percent >= 50 ? 'Moderate' : 'Needs Improvement';
+
+  const payload = {
+    sessionId,
+    providerUsed,
+    categories: normalizedRows,
+    totalScore,
+    maxScore,
+    percent,
+    label,
+    summary: cleanText(parsedResult?.summary, 500) || 'Derived from crawl data using 10 core parent-information categories.',
+    generatedAt: new Date().toISOString(),
+    fromCache: false,
+  };
+
+  try {
+    await redis.setex(cacheKey, 3600, JSON.stringify(payload));
+  } catch {
+    // cache best effort
+  }
+
+  return res.json(payload);
 });
 
 /* ================================================================== */
@@ -1854,6 +2182,62 @@ app.post('/internal/score-complete', async (req, res) => {
 });
 
 /* ================================================================== */
+/*  GET /api/schools/search -- public crawled-school picker search     */
+/* ================================================================== */
+
+app.get('/api/schools/search', async (req, res) => {
+  const parsed = schoolSearchQuerySchema.safeParse({ q: String(req.query.q || '').trim() });
+  if (!parsed.success) return res.status(400).json({ error: 'Query is required' });
+
+  const query = parsed.data.q;
+  const like = `%${query}%`;
+  const startsWith = `${query}%`;
+
+  const result = await pgPool.query<{
+    name: string;
+    city: string | null;
+    state: string | null;
+    pincode: string | null;
+    website_url: string;
+  }>(
+    `
+      SELECT
+        name,
+        city,
+        state,
+        pincode,
+        website_url
+      FROM schools
+      WHERE crawl_status IN ('analysed', 'partial')
+        AND (
+          name ILIKE $1
+          OR city ILIKE $1
+          OR state ILIKE $1
+          OR pincode ILIKE $1
+        )
+      ORDER BY
+        CASE WHEN name ILIKE $2 THEN 0 ELSE 1 END,
+        CASE WHEN city ILIKE $2 THEN 0 ELSE 1 END,
+        name ASC,
+        city ASC NULLS LAST,
+        state ASC NULLS LAST
+      LIMIT 20
+    `,
+    [like, startsWith],
+  );
+
+  return res.json({
+    items: result.rows.map((r: { name: string; city: string | null; state: string | null; pincode: string | null; website_url: string }) => ({
+      name: r.name,
+      city: r.city,
+      state: r.state,
+      pincode: r.pincode,
+      websiteUrl: /^https?:\/\//i.test(r.website_url) ? r.website_url : `https://${r.website_url}`,
+    })),
+  });
+});
+
+/* ================================================================== */
 /*  POST /internal/crawl-failed -- optional callback for failed crawl  */
 /* ================================================================== */
 
@@ -1948,6 +2332,643 @@ app.post('/internal/audit-result', async (req, res) => {
 });
 
 /* ================================================================== */
+/*  Paid report admin + worker APIs                                    */
+/* ================================================================== */
+
+app.post('/api/admin/paid-reports/pin/verify', async (req, res) => {
+  const parsed = adminPinVerifySchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid pin payload' });
+  const ok = await verifyActiveAdminPin(parsed.data.pin);
+  return res.json({ ok });
+});
+
+app.get('/api/admin/paid-reports/pin/current', async (_req, res) => {
+  const current = await ensureActiveAdminPin();
+  return res.json({ pin: current.pin, expiresAt: current.expiresAt.toISOString() });
+});
+
+app.post('/api/admin/paid-reports/preflight', async (req, res) => {
+  const parsed = paidReportPreflightSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid schoolId' });
+
+  const schoolRes = await pgPool.query<{
+    id: string;
+    website_url: string | null;
+    crawl_status: string | null;
+    principal_email: string | null;
+    name: string;
+  }>(
+    `SELECT id, website_url, crawl_status, principal_email, name
+     FROM schools
+     WHERE id = $1`,
+    [parsed.data.schoolId],
+  );
+
+  if (!schoolRes.rowCount) return res.status(404).json({ error: 'School not found' });
+  const school = schoolRes.rows[0];
+
+  const failures: Array<{ code: string; message: string; details?: Record<string, unknown> }> = [];
+
+  const normalizedWebsite = normalizeWebsiteDomain(school.website_url);
+  if (!normalizedWebsite) {
+    failures.push({ code: 'missing_website', message: 'School website is missing in registry.' });
+  }
+
+  if (!['analysed', 'partial'].includes(String(school.crawl_status || '').toLowerCase())) {
+    failures.push({
+      code: 'invalid_classification',
+      message: 'School is not in analysed/partial state.',
+      details: { crawlStatus: school.crawl_status },
+    });
+  }
+
+  if (!school.principal_email) {
+    failures.push({
+      code: 'missing_principal_email',
+      message: 'Principal email is missing in school registry.',
+      details: { attempts: 3 },
+    });
+  }
+
+  let websiteCheck: { ok: boolean; reason: string | null; statusCode: number | null } | null = null;
+  if (normalizedWebsite) {
+    websiteCheck = await checkWebsiteLive(`https://${normalizedWebsite}`);
+    if (!websiteCheck.ok) {
+      failures.push({
+        code: 'website_unreachable',
+        message: websiteCheck.reason || 'Website is not reachable with required criteria.',
+        details: { statusCode: websiteCheck.statusCode },
+      });
+    }
+  }
+
+  return res.json({
+    ok: failures.length === 0,
+    school: {
+      id: school.id,
+      name: school.name,
+      websiteUrl: normalizedWebsite ? `https://${normalizedWebsite}` : null,
+      crawlStatus: school.crawl_status,
+      principalEmailPresent: Boolean(school.principal_email),
+    },
+    websiteCheck,
+    failures,
+  });
+});
+
+app.post('/api/admin/paid-reports', async (req, res) => {
+  const parsed = paidReportCreateSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid paid report request' });
+
+  const pinOk = await verifyActiveAdminPin(parsed.data.pin);
+  if (!pinOk) return res.status(401).json({ error: 'Invalid or expired admin PIN' });
+
+  const preflightResData = await (async () => {
+    const schoolRes = await pgPool.query<{
+      id: string;
+      website_url: string | null;
+      crawl_status: string | null;
+      principal_email: string | null;
+      name: string;
+    }>(
+      `SELECT id, website_url, crawl_status, principal_email, name
+       FROM schools
+       WHERE id = $1`,
+      [parsed.data.schoolId],
+    );
+    if (!schoolRes.rowCount) return { ok: false, notFound: true, failures: [{ code: 'missing_school', message: 'School not found' }] };
+    const school = schoolRes.rows[0];
+    const failures: Array<{ code: string; message: string; details?: Record<string, unknown> }> = [];
+    const normalizedWebsite = normalizeWebsiteDomain(school.website_url);
+    if (!normalizedWebsite) failures.push({ code: 'missing_website', message: 'School website is missing in registry.' });
+    if (!['analysed', 'partial'].includes(String(school.crawl_status || '').toLowerCase())) {
+      failures.push({ code: 'invalid_classification', message: 'School is not in analysed/partial state.' });
+    }
+    if (!school.principal_email) failures.push({ code: 'missing_principal_email', message: 'Principal email is missing in school registry.', details: { attempts: 3 } });
+    let websiteCheck: { ok: boolean; reason: string | null; statusCode: number | null } | null = null;
+    if (normalizedWebsite) {
+      websiteCheck = await checkWebsiteLive(`https://${normalizedWebsite}`);
+      if (!websiteCheck.ok) failures.push({ code: 'website_unreachable', message: websiteCheck.reason || 'Website is not reachable.', details: { statusCode: websiteCheck.statusCode } });
+    }
+    return {
+      ok: failures.length === 0,
+      school,
+      normalizedWebsite: normalizedWebsite ? `https://${normalizedWebsite}` : null,
+      failures,
+      websiteCheck,
+    };
+  })();
+
+  if ((preflightResData as { notFound?: boolean }).notFound) return res.status(404).json({ error: 'School not found' });
+  if (!preflightResData.ok) return res.status(400).json({ error: 'Preflight failed', preflight: preflightResData });
+
+  const activeSession = await pgPool.query<{ id: string; status: string }>(
+    `SELECT id, status
+     FROM paid_report_sessions
+     WHERE school_id = $1
+       AND status IN ('queued', 'running', 'awaiting_admin_pdf')
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [parsed.data.schoolId],
+  );
+  if (activeSession.rowCount) {
+    return res.status(200).json({ ok: true, deduped: true, reportSessionId: activeSession.rows[0].id, status: activeSession.rows[0].status });
+  }
+
+  const accessCode = generateNumericCode(8);
+  const insert = await pgPool.query<{ id: string }>(
+    `INSERT INTO paid_report_sessions(
+      school_id, status, preflight_result, admin_name, admin_ip, access_code
+    ) VALUES($1, 'queued', $2::jsonb, $3, $4::inet, $5)
+    RETURNING id`,
+    [
+      parsed.data.schoolId,
+      JSON.stringify({ failures: [], websiteCheck: preflightResData.websiteCheck }),
+      parsed.data.adminName,
+      getRequestIp(req),
+      accessCode,
+    ],
+  );
+  const reportSessionId = insert.rows[0].id;
+
+  await pgPool.query(
+    `INSERT INTO paid_report_events(report_session_id, event_type, payload, admin_name, admin_ip)
+     VALUES($1, 'triggered', $2::jsonb, $3, $4::inet)`,
+    [reportSessionId, JSON.stringify({ schoolId: parsed.data.schoolId }), parsed.data.adminName, getRequestIp(req)],
+  );
+
+  await paidReportQueue.add(
+    'paid-report',
+    {
+      reportSessionId,
+      schoolId: parsed.data.schoolId,
+      websiteUrl: preflightResData.normalizedWebsite,
+      startedBy: parsed.data.adminName,
+    },
+    { removeOnComplete: { count: 200 }, removeOnFail: { count: 200 } },
+  );
+
+  return res.status(202).json({ ok: true, reportSessionId, status: 'queued' });
+});
+
+app.get('/api/admin/paid-reports/:id', async (req, res) => {
+  const reportSessionId = req.params.id;
+  const sessionRes = await pgPool.query(
+    `SELECT *
+     FROM paid_report_sessions
+     WHERE id = $1`,
+    [reportSessionId],
+  );
+  if (!sessionRes.rowCount) return res.status(404).json({ error: 'Paid report session not found' });
+
+  const stepRes = await pgPool.query(
+    `SELECT step_name, status, attempt_no, duration_ms, started_at, ended_at, details
+     FROM paid_report_step_metrics
+     WHERE report_session_id = $1
+     ORDER BY created_at ASC`,
+    [reportSessionId],
+  );
+
+  const modelRunsRes = await pgPool.query(
+    `SELECT layer_name, provider, model, status, input_tokens, output_tokens, total_tokens, duration_ms, error_message, created_at
+     FROM paid_report_model_runs
+     WHERE report_session_id = $1
+     ORDER BY created_at ASC`,
+    [reportSessionId],
+  );
+
+  return res.json({
+    ...sessionRes.rows[0],
+    steps: stepRes.rows,
+    modelRuns: modelRunsRes.rows,
+  });
+});
+
+app.post('/api/admin/paid-reports/:id/access-code/verify', async (req, res) => {
+  const parsed = paidReportCodeVerifySchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid access code payload' });
+  const reportSessionId = req.params.id;
+
+  const result = await pgPool.query(
+    `UPDATE paid_report_sessions
+     SET access_code_used_at = NOW()
+     WHERE id = $1
+       AND access_code = $2
+       AND access_code_used_at IS NULL
+     RETURNING id`,
+    [reportSessionId, parsed.data.accessCode],
+  );
+  return res.json({ ok: (result.rowCount ?? 0) > 0 });
+});
+
+app.post('/api/admin/paid-reports/:id/approve-pdf', async (req, res) => {
+  const parsed = paidReportActionSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid approve payload' });
+  const reportSessionId = req.params.id;
+  const sessionRes = await pgPool.query<{ final_audit_json: unknown; school_id: string }>(
+    `SELECT final_audit_json, school_id
+     FROM paid_report_sessions
+     WHERE id = $1`,
+    [reportSessionId],
+  );
+  if (!sessionRes.rowCount) return res.status(404).json({ error: 'Paid report session not found' });
+
+  const payload = JSON.stringify(sessionRes.rows[0].final_audit_json || {}, null, 2);
+  const storagePath = `paid-reports/${sessionRes.rows[0].school_id}/${reportSessionId}/final_audit.json`;
+  const location = await storage.uploadText(storagePath, payload, 'application/json');
+
+  await pgPool.query(
+    `UPDATE paid_report_sessions
+     SET status = 'completed',
+         pdf_url = $2,
+         completed_at = NOW()
+     WHERE id = $1`,
+    [reportSessionId, location],
+  );
+
+  await pgPool.query(
+    `INSERT INTO paid_report_events(report_session_id, event_type, payload, admin_name, admin_ip)
+     VALUES($1, 'approve_pdf', $2::jsonb, $3, $4::inet)`,
+    [reportSessionId, JSON.stringify({ pdfUrl: location }), parsed.data.adminName, getRequestIp(req)],
+  );
+
+  return res.json({ ok: true, pdfUrl: location });
+});
+
+app.post('/api/admin/paid-reports/:id/stop', async (req, res) => {
+  const parsed = paidReportActionSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid stop payload' });
+  const reportSessionId = req.params.id;
+  const result = await pgPool.query(
+    `UPDATE paid_report_sessions
+     SET status = 'stopped',
+         completed_at = NOW()
+     WHERE id = $1
+       AND status IN ('queued', 'running')
+     RETURNING id`,
+    [reportSessionId],
+  );
+  if (!result.rowCount) return res.status(409).json({ error: 'Report is not in queued/running state' });
+  await pgPool.query(
+    `INSERT INTO paid_report_events(report_session_id, event_type, payload, admin_name, admin_ip)
+     VALUES($1, 'stopped', '{}'::jsonb, $2, $3::inet)`,
+    [reportSessionId, parsed.data.adminName, getRequestIp(req)],
+  );
+  return res.json({ ok: true });
+});
+
+app.post('/api/admin/paid-reports/:id/retry', async (req, res) => {
+  const parsed = paidReportActionSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid retry payload' });
+  const reportSessionId = req.params.id;
+  const sessionRes = await pgPool.query<{ id: string; school_id: string }>(
+    `SELECT id, school_id
+     FROM paid_report_sessions
+     WHERE id = $1
+       AND status IN ('failed', 'stopped')`,
+    [reportSessionId],
+  );
+  if (!sessionRes.rowCount) return res.status(409).json({ error: 'Retry allowed only for failed/stopped sessions' });
+
+  await pgPool.query(
+    `UPDATE paid_report_sessions
+     SET status = 'queued',
+         error_message = NULL,
+         started_at = NULL,
+         completed_at = NULL
+     WHERE id = $1`,
+    [reportSessionId],
+  );
+
+  const schoolRes = await pgPool.query<{ website_url: string | null }>('SELECT website_url FROM schools WHERE id = $1', [sessionRes.rows[0].school_id]);
+  const websiteUrl = normalizeWebsiteDomain(schoolRes.rows[0]?.website_url) ? `https://${normalizeWebsiteDomain(schoolRes.rows[0]?.website_url)}` : null;
+  if (!websiteUrl) return res.status(400).json({ error: 'School website missing for retry' });
+
+  await paidReportQueue.add(
+    'paid-report',
+    {
+      reportSessionId,
+      schoolId: sessionRes.rows[0].school_id,
+      websiteUrl,
+      startedBy: parsed.data.adminName,
+    },
+    { removeOnComplete: { count: 200 }, removeOnFail: { count: 200 } },
+  );
+
+  await pgPool.query(
+    `INSERT INTO paid_report_events(report_session_id, event_type, payload, admin_name, admin_ip)
+     VALUES($1, 'retried', '{}'::jsonb, $2, $3::inet)`,
+    [reportSessionId, parsed.data.adminName, getRequestIp(req)],
+  );
+
+  return res.json({ ok: true, reportSessionId });
+});
+
+app.post('/api/admin/paid-reports/:id/rerun', async (req, res) => {
+  const parsed = paidReportActionSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid rerun payload' });
+  const prevId = req.params.id;
+  const oldRes = await pgPool.query<{ school_id: string }>(
+    `SELECT school_id FROM paid_report_sessions WHERE id = $1`,
+    [prevId],
+  );
+  if (!oldRes.rowCount) return res.status(404).json({ error: 'Previous report session not found' });
+  const schoolId = oldRes.rows[0].school_id;
+
+  const activeSession = await pgPool.query(
+    `SELECT id FROM paid_report_sessions
+     WHERE school_id = $1
+       AND status IN ('queued', 'running', 'awaiting_admin_pdf')
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [schoolId],
+  );
+  if (activeSession.rowCount) return res.status(409).json({ error: 'Another active paid report already exists for this school' });
+
+  const schoolRes = await pgPool.query<{ website_url: string | null }>('SELECT website_url FROM schools WHERE id = $1', [schoolId]);
+  const normalized = normalizeWebsiteDomain(schoolRes.rows[0]?.website_url);
+  if (!normalized) return res.status(400).json({ error: 'School website missing for rerun' });
+  const accessCode = generateNumericCode(8);
+  const insert = await pgPool.query<{ id: string }>(
+    `INSERT INTO paid_report_sessions(school_id, status, preflight_result, admin_name, admin_ip, access_code)
+     VALUES($1, 'queued', '{}'::jsonb, $2, $3::inet, $4)
+     RETURNING id`,
+    [schoolId, parsed.data.adminName, getRequestIp(req), accessCode],
+  );
+  const reportSessionId = insert.rows[0].id;
+
+  await paidReportQueue.add(
+    'paid-report',
+    {
+      reportSessionId,
+      schoolId,
+      websiteUrl: `https://${normalized}`,
+      startedBy: parsed.data.adminName,
+    },
+    { removeOnComplete: { count: 200 }, removeOnFail: { count: 200 } },
+  );
+  await pgPool.query(
+    `INSERT INTO paid_report_events(report_session_id, event_type, payload, admin_name, admin_ip)
+     VALUES($1, 'rerun_created', $2::jsonb, $3, $4::inet)`,
+    [reportSessionId, JSON.stringify({ previousReportSessionId: prevId }), parsed.data.adminName, getRequestIp(req)],
+  );
+  return res.status(202).json({ ok: true, reportSessionId });
+});
+
+app.post('/internal/paid-report/step', async (req, res) => {
+  if (!requireInternalKey(req, res)) return;
+  const {
+    reportSessionId, stepName, status, attemptNo, startedAt, endedAt, durationMs, details,
+  } = req.body as {
+    reportSessionId: string;
+    stepName: string;
+    status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+    attemptNo?: number;
+    startedAt?: string;
+    endedAt?: string;
+    durationMs?: number;
+    details?: Record<string, unknown>;
+  };
+  if (!reportSessionId || !stepName || !status) return res.status(400).json({ error: 'Invalid step payload' });
+
+  await pgPool.query(
+    `INSERT INTO paid_report_step_metrics(
+      report_session_id, step_name, status, attempt_no, started_at, ended_at, duration_ms, details
+     ) VALUES($1, $2, $3, $4, $5::timestamptz, $6::timestamptz, $7, $8::jsonb)`,
+    [
+      reportSessionId,
+      stepName,
+      status,
+      attemptNo || 1,
+      startedAt || null,
+      endedAt || null,
+      durationMs || null,
+      JSON.stringify(details || {}),
+    ],
+  );
+
+  if (status === 'running') {
+    await pgPool.query(
+      `UPDATE paid_report_sessions
+       SET status = 'running',
+           started_at = COALESCE(started_at, NOW())
+       WHERE id = $1`,
+      [reportSessionId],
+    );
+  }
+
+  return res.json({ ok: true });
+});
+
+app.post('/internal/paid-report/model-run', async (req, res) => {
+  if (!requireInternalKey(req, res)) return;
+  const {
+    reportSessionId, layerName, provider, model, status, inputTokens, outputTokens, totalTokens, durationMs, errorMessage, requestMeta,
+  } = req.body as {
+    reportSessionId: string;
+    layerName: string;
+    provider: string;
+    model: string;
+    status: 'completed' | 'failed' | 'fallback_used' | 'skipped';
+    inputTokens?: number | null;
+    outputTokens?: number | null;
+    totalTokens?: number | null;
+    durationMs?: number | null;
+    errorMessage?: string | null;
+    requestMeta?: Record<string, unknown> | null;
+  };
+  if (!reportSessionId || !layerName || !provider || !model || !status) return res.status(400).json({ error: 'Invalid model run payload' });
+
+  await pgPool.query(
+    `INSERT INTO paid_report_model_runs(
+      report_session_id, layer_name, provider, model, status,
+      input_tokens, output_tokens, total_tokens, duration_ms, error_message, request_meta
+     ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)`,
+    [
+      reportSessionId,
+      layerName,
+      provider,
+      model,
+      status,
+      inputTokens ?? null,
+      outputTokens ?? null,
+      totalTokens ?? null,
+      durationMs ?? null,
+      errorMessage ?? null,
+      JSON.stringify(requestMeta || {}),
+    ],
+  );
+  return res.json({ ok: true });
+});
+
+app.post('/internal/paid-report/finalize', async (req, res) => {
+  if (!requireInternalKey(req, res)) return;
+  const {
+    reportSessionId, analysisSessionId, crawlData, socialData, googleReviewsData, openaiJson, geminiJson, claudeJson,
+    finalAuditJson, overallScore, limitedEvidence, totalRuntimeMs, reasoningRuntimeMs, queueWaitMs,
+  } = req.body as {
+    reportSessionId: string;
+    analysisSessionId?: string | null;
+    crawlData?: Record<string, unknown>;
+    socialData?: Record<string, unknown>;
+    googleReviewsData?: Record<string, unknown>;
+    openaiJson?: Record<string, unknown>;
+    geminiJson?: Record<string, unknown>;
+    claudeJson?: Record<string, unknown>;
+    finalAuditJson?: Record<string, unknown>;
+    overallScore?: number | null;
+    limitedEvidence?: boolean;
+    totalRuntimeMs?: number | null;
+    reasoningRuntimeMs?: number | null;
+    queueWaitMs?: number | null;
+  };
+  if (!reportSessionId) return res.status(400).json({ error: 'Invalid finalize payload' });
+
+  await pgPool.query(
+    `UPDATE paid_report_sessions
+     SET status = 'awaiting_admin_pdf',
+         analysis_session_id = COALESCE($2::uuid, analysis_session_id),
+         crawl_data = $3::jsonb,
+         social_data = $4::jsonb,
+         google_reviews_data = $5::jsonb,
+         openai_json = $6::jsonb,
+         gemini_json = $7::jsonb,
+         claude_json = $8::jsonb,
+         final_audit_json = $9::jsonb,
+         overall_score = $10,
+         limited_evidence = COALESCE($11, FALSE),
+         total_runtime_ms = $12,
+         reasoning_runtime_ms = $13,
+         queue_wait_ms = $14
+     WHERE id = $1`,
+    [
+      reportSessionId,
+      analysisSessionId || null,
+      JSON.stringify(crawlData || {}),
+      JSON.stringify(socialData || {}),
+      JSON.stringify(googleReviewsData || {}),
+      JSON.stringify(openaiJson || {}),
+      JSON.stringify(geminiJson || {}),
+      JSON.stringify(claudeJson || {}),
+      JSON.stringify(finalAuditJson || {}),
+      overallScore ?? null,
+      Boolean(limitedEvidence),
+      totalRuntimeMs ?? null,
+      reasoningRuntimeMs ?? null,
+      queueWaitMs ?? null,
+    ],
+  );
+
+  await pgPool.query(
+    `INSERT INTO paid_report_events(report_session_id, event_type, payload)
+     VALUES($1, 'finalized', $2::jsonb)`,
+    [reportSessionId, JSON.stringify({ overallScore: overallScore ?? null, limitedEvidence: Boolean(limitedEvidence) })],
+  );
+
+  return res.json({ ok: true });
+});
+
+app.post('/internal/paid-report/context', async (req, res) => {
+  if (!requireInternalKey(req, res)) return;
+  const { schoolId, analysisSessionId } = req.body as { schoolId: string; analysisSessionId: string };
+  if (!schoolId || !analysisSessionId) return res.status(400).json({ error: 'Invalid context payload' });
+
+  const [schoolRes, pagesRes, previousReportRes] = await Promise.all([
+    pgPool.query(
+      `SELECT id, name, website_url, city, state, board, principal_email,
+              social_facebook, social_instagram, social_youtube
+       FROM schools
+       WHERE id = $1`,
+      [schoolId],
+    ),
+    pgPool.query(
+      `SELECT page_url, title, extracted_text
+       FROM crawled_pages
+       WHERE session_id = $1
+       ORDER BY fetched_at ASC`,
+      [analysisSessionId],
+    ),
+    pgPool.query(
+      `SELECT id, overall_score, final_audit_json, completed_at
+       FROM paid_report_sessions
+       WHERE school_id = $1
+         AND status = 'completed'
+       ORDER BY completed_at DESC NULLS LAST, created_at DESC
+       LIMIT 1`,
+      [schoolId],
+    ),
+  ]);
+
+  if (!schoolRes.rowCount) return res.status(404).json({ error: 'School not found' });
+
+  const school = schoolRes.rows[0];
+  const crawlData = {
+    school: {
+      id: school.id,
+      name: school.name,
+      url: school.website_url,
+      city: school.city,
+      state: school.state,
+      board: school.board,
+      principal_email: school.principal_email,
+      crawl_date: new Date().toISOString(),
+    },
+    pages_crawled: pagesRes.rows.map((r: { page_url: string; title: string | null; extracted_text: string | null }) => ({
+      url: r.page_url,
+      title: r.title,
+      text: r.extracted_text || '',
+    })),
+    pdfs_processed: [],
+    disclosure_documents: [],
+    facts: [],
+  };
+
+  const socialData = {
+    facebook: school.social_facebook || null,
+    instagram: school.social_instagram || null,
+    youtube: school.social_youtube || null,
+  };
+
+  const previous = previousReportRes.rowCount
+    ? {
+      exists: true,
+      report_id: previousReportRes.rows[0].id,
+      report_date: previousReportRes.rows[0].completed_at,
+      overall_score: previousReportRes.rows[0].overall_score,
+      final_audit_json: previousReportRes.rows[0].final_audit_json || {},
+    }
+    : { exists: false };
+
+  return res.json({
+    crawlData,
+    socialData,
+    googleReviewsData: { status: 'insufficient_data' },
+    previousReport: previous,
+  });
+});
+
+app.post('/internal/paid-report/fail', async (req, res) => {
+  if (!requireInternalKey(req, res)) return;
+  const { reportSessionId, errorMessage } = req.body as { reportSessionId: string; errorMessage?: string };
+  if (!reportSessionId) return res.status(400).json({ error: 'Invalid fail payload' });
+
+  await pgPool.query(
+    `UPDATE paid_report_sessions
+     SET status = 'failed',
+         error_message = $2,
+         completed_at = NOW()
+     WHERE id = $1`,
+    [reportSessionId, cleanText(errorMessage, 1000)],
+  );
+  await pgPool.query(
+    `INSERT INTO paid_report_events(report_session_id, event_type, payload)
+     VALUES($1, 'failed', $2::jsonb)`,
+    [reportSessionId, JSON.stringify({ error: cleanText(errorMessage, 1000) })],
+  );
+  return res.json({ ok: true });
+});
+
+/* ================================================================== */
 /*  POST /api/scan/:id/ask — Q&A (unchanged logic)                    */
 /* ================================================================== */
 
@@ -2035,6 +3056,440 @@ app.post('/api/b2b-interest', async (req, res) => {
 });
 
 /* ================================================================== */
+/*  POST /api/analytics/overview -- business analytics dashboard       */
+/* ================================================================== */
+
+app.post('/api/analytics/overview', async (req, res) => {
+  const parsed = analyticsAccessSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Password is required' });
+  if (parsed.data.password !== analyticsPassword()) return res.status(401).json({ error: 'Invalid password' });
+
+  const totalsPromise = pgPool.query<{
+    total_scans: number;
+    completed_scans: number;
+    successful_scans: number;
+    rejected_scans: number;
+    failed_scans: number;
+  }>(`
+    SELECT
+      COUNT(*)::INT AS total_scans,
+      COUNT(*) FILTER (WHERE completed_at IS NOT NULL)::INT AS completed_scans,
+      COUNT(*) FILTER (WHERE status = 'Ready')::INT AS successful_scans,
+      COUNT(*) FILTER (WHERE status IN ('Rejected', 'Uncertain'))::INT AS rejected_scans,
+      COUNT(*) FILTER (WHERE status IN ('Failed', 'Error'))::INT AS failed_scans
+    FROM analysis_sessions
+  `);
+
+  const uniqueSchoolsPromise = pgPool.query<{ unique_schools_crawled: number; }>(`
+    SELECT COUNT(*)::INT AS unique_schools_crawled
+    FROM schools
+  `);
+
+  const schoolsListPromise = pgPool.query<{
+    name: string;
+    website_url: string;
+    last_crawled_at: Date | null;
+  }>(`
+    SELECT name, website_url, last_crawled_at
+    FROM schools
+    ORDER BY last_crawled_at DESC NULLS LAST, created_at DESC
+    LIMIT 200
+  `);
+
+  const durationSummaryPromise = pgPool.query<{
+    average_ms: number | null;
+    median_ms: number | null;
+    p95_ms: number | null;
+  }>(`
+    SELECT
+      ROUND(AVG(duration_ms))::INT AS average_ms,
+      PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY duration_ms)::INT AS median_ms,
+      PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms)::INT AS p95_ms
+    FROM (
+      SELECT COALESCE(
+        scan_duration_ms,
+        CASE
+          WHEN completed_at IS NOT NULL THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (completed_at - created_at)) * 1000))::INT
+          ELSE NULL
+        END
+      ) AS duration_ms
+      FROM analysis_sessions
+    ) d
+    WHERE duration_ms IS NOT NULL
+  `);
+
+  const slowestScansPromise = pgPool.query<{
+    session_id: string;
+    school_name: string;
+    url: string;
+    completed_at: Date | null;
+    duration_ms: number;
+  }>(`
+    SELECT
+      d.id AS session_id,
+      COALESCE(s.name, d.host) AS school_name,
+      d.url,
+      d.completed_at,
+      d.duration_ms
+    FROM (
+      SELECT
+        a.id,
+        a.url,
+        a.completed_at,
+        LOWER(SPLIT_PART(REGEXP_REPLACE(SPLIT_PART(SPLIT_PART(a.url, '://', 2), '/', 1), '^www\\.', ''), ':', 1)) AS host,
+        COALESCE(
+          a.scan_duration_ms,
+          CASE
+            WHEN a.completed_at IS NOT NULL THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (a.completed_at - a.created_at)) * 1000))::INT
+            ELSE NULL
+          END
+        ) AS duration_ms
+      FROM analysis_sessions a
+    ) d
+    LEFT JOIN schools s
+      ON LOWER(REGEXP_REPLACE(s.website_url, '^www\\.', '')) = d.host
+    WHERE d.duration_ms IS NOT NULL
+    ORDER BY d.duration_ms DESC
+    LIMIT 10
+  `);
+
+  const avgDurationByDayPromise = pgPool.query<{
+    day: string;
+    average_ms: number;
+    run_count: number;
+  }>(`
+    SELECT
+      DATE(d.created_at)::TEXT AS day,
+      ROUND(AVG(d.duration_ms))::INT AS average_ms,
+      COUNT(*)::INT AS run_count
+    FROM (
+      SELECT
+        created_at,
+        COALESCE(
+          scan_duration_ms,
+          CASE
+            WHEN completed_at IS NOT NULL THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (completed_at - created_at)) * 1000))::INT
+            ELSE NULL
+          END
+        ) AS duration_ms
+      FROM analysis_sessions
+    ) d
+    WHERE d.duration_ms IS NOT NULL
+    GROUP BY DATE(d.created_at)
+    ORDER BY DATE(d.created_at) DESC
+    LIMIT 30
+  `);
+
+  const comparisonsSummaryPromise = pgPool.query<{
+    compare_lists_created: number;
+    comparisons_done: number;
+    schools_added_to_compare: number;
+  }>(`
+    SELECT
+      (SELECT COUNT(*)::INT FROM compare_lists) AS compare_lists_created,
+      (
+        SELECT COUNT(*)::INT
+        FROM (
+          SELECT compare_list_id
+          FROM compare_list_items
+          GROUP BY compare_list_id
+          HAVING COUNT(*) >= 2
+        ) c
+      ) AS comparisons_done,
+      (SELECT COUNT(*)::INT FROM compare_list_items) AS schools_added_to_compare
+  `);
+
+  const mostComparedSchoolsPromise = pgPool.query<{
+    school_name: string;
+    website: string;
+    compare_adds: number;
+  }>(`
+    SELECT
+      COALESCE(s.name, d.host) AS school_name,
+      COALESCE(s.website_url, d.host) AS website,
+      COUNT(*)::INT AS compare_adds
+    FROM (
+      SELECT
+        cli.session_id,
+        LOWER(SPLIT_PART(REGEXP_REPLACE(SPLIT_PART(SPLIT_PART(a.url, '://', 2), '/', 1), '^www\\.', ''), ':', 1)) AS host
+      FROM compare_list_items cli
+      JOIN analysis_sessions a ON a.id = cli.session_id
+    ) d
+    LEFT JOIN schools s
+      ON LOWER(REGEXP_REPLACE(s.website_url, '^www\\.', '')) = d.host
+    GROUP BY COALESCE(s.name, d.host), COALESCE(s.website_url, d.host)
+    ORDER BY compare_adds DESC, school_name ASC
+    LIMIT 10
+  `);
+
+  const questionSummaryPromise = pgPool.query<{ total_questions_asked: number; }>(`
+    SELECT COUNT(*)::INT AS total_questions_asked
+    FROM chat_messages
+    WHERE role = 'user'
+  `);
+
+  const questionsPerDayPromise = pgPool.query<{
+    day: string;
+    questions: number;
+  }>(`
+    SELECT
+      DATE(created_at)::TEXT AS day,
+      COUNT(*)::INT AS questions
+    FROM chat_messages
+    WHERE role = 'user'
+    GROUP BY DATE(created_at)
+    ORDER BY DATE(created_at) DESC
+    LIMIT 30
+  `);
+
+  const questionsPerScanPromise = pgPool.query<{ questions_per_scan: number; }>(`
+    SELECT COALESCE(
+      ROUND(
+        (SELECT COUNT(*)::DECIMAL FROM chat_messages WHERE role = 'user')
+        / NULLIF((SELECT COUNT(*) FROM analysis_sessions), 0),
+      2),
+      0
+    ) AS questions_per_scan
+  `);
+
+  const questionConversionPromise = pgPool.query<{ percent: number; }>(`
+    WITH completed AS (
+      SELECT id
+      FROM analysis_sessions
+      WHERE completed_at IS NOT NULL
+    ),
+    completed_with_question AS (
+      SELECT DISTINCT c.id
+      FROM completed c
+      JOIN chat_messages m ON m.session_id = c.id AND m.role = 'user'
+    )
+    SELECT COALESCE(
+      ROUND((SELECT COUNT(*)::DECIMAL FROM completed_with_question) * 100 / NULLIF((SELECT COUNT(*) FROM completed), 0), 2),
+      0
+    ) AS percent
+  `);
+
+  const questionsBySchoolPromise = pgPool.query<{
+    school_name: string;
+    website: string;
+    total_questions: number;
+  }>(`
+    SELECT
+      COALESCE(s.name, d.host) AS school_name,
+      COALESCE(s.website_url, d.host) AS website,
+      COUNT(*)::INT AS total_questions
+    FROM (
+      SELECT
+        m.session_id,
+        LOWER(SPLIT_PART(REGEXP_REPLACE(SPLIT_PART(SPLIT_PART(a.url, '://', 2), '/', 1), '^www\\.', ''), ':', 1)) AS host
+      FROM chat_messages m
+      JOIN analysis_sessions a ON a.id = m.session_id
+      WHERE m.role = 'user'
+    ) d
+    LEFT JOIN schools s
+      ON LOWER(REGEXP_REPLACE(s.website_url, '^www\\.', '')) = d.host
+    GROUP BY COALESCE(s.name, d.host), COALESCE(s.website_url, d.host)
+    ORDER BY total_questions DESC, school_name ASC
+    LIMIT 20
+  `);
+
+  const latestQuestionsPromise = pgPool.query<{
+    asked_at: Date;
+    school_name: string;
+    content: string;
+  }>(`
+    SELECT
+      m.created_at AS asked_at,
+      COALESCE(s.name, LOWER(SPLIT_PART(REGEXP_REPLACE(SPLIT_PART(SPLIT_PART(a.url, '://', 2), '/', 1), '^www\\.', ''), ':', 1))) AS school_name,
+      m.content
+    FROM chat_messages m
+    JOIN analysis_sessions a ON a.id = m.session_id
+    LEFT JOIN schools s
+      ON LOWER(REGEXP_REPLACE(s.website_url, '^www\\.', ''))
+      = LOWER(SPLIT_PART(REGEXP_REPLACE(SPLIT_PART(SPLIT_PART(a.url, '://', 2), '/', 1), '^www\\.', ''), ':', 1))
+    WHERE m.role = 'user'
+    ORDER BY m.created_at DESC
+    LIMIT 30
+  `);
+
+  const mostScannedSchoolsPromise = pgPool.query<{
+    school_name: string;
+    website: string;
+    scans: number;
+  }>(`
+    SELECT
+      COALESCE(s.name, d.host) AS school_name,
+      COALESCE(s.website_url, d.host) AS website,
+      COUNT(*)::INT AS scans
+    FROM (
+      SELECT
+        LOWER(SPLIT_PART(REGEXP_REPLACE(SPLIT_PART(SPLIT_PART(url, '://', 2), '/', 1), '^www\\.', ''), ':', 1)) AS host
+      FROM analysis_sessions
+    ) d
+    LEFT JOIN schools s
+      ON LOWER(REGEXP_REPLACE(s.website_url, '^www\\.', '')) = d.host
+    GROUP BY COALESCE(s.name, d.host), COALESCE(s.website_url, d.host)
+    ORDER BY scans DESC, school_name ASC
+    LIMIT 10
+  `);
+
+  const schoolCountersPromise = pgPool.query<{
+    name: string;
+    website_url: string;
+    view_count: number;
+    compare_count: number;
+    search_count: number;
+  }>(`
+    SELECT name, website_url, view_count, compare_count, search_count
+    FROM schools
+    ORDER BY view_count DESC, compare_count DESC, search_count DESC, updated_at DESC
+    LIMIT 10
+  `);
+
+  const b2bSummaryPromise = pgPool.query<{
+    total_clicks: number;
+    unique_click_sessions: number;
+  }>(`
+    SELECT
+      COUNT(*)::INT AS total_clicks,
+      COUNT(DISTINCT session_id)::INT AS unique_click_sessions
+    FROM b2b_leads
+  `);
+
+  const [
+    totalsRes,
+    uniqueSchoolsRes,
+    schoolsListRes,
+    durationSummaryRes,
+    slowestScansRes,
+    avgDurationByDayRes,
+    comparisonsSummaryRes,
+    mostComparedSchoolsRes,
+    questionSummaryRes,
+    questionsPerDayRes,
+    questionsPerScanRes,
+    questionConversionRes,
+    questionsBySchoolRes,
+    latestQuestionsRes,
+    mostScannedSchoolsRes,
+    schoolCountersRes,
+    b2bSummaryRes,
+  ] = await Promise.all([
+    totalsPromise,
+    uniqueSchoolsPromise,
+    schoolsListPromise,
+    durationSummaryPromise,
+    slowestScansPromise,
+    avgDurationByDayPromise,
+    comparisonsSummaryPromise,
+    mostComparedSchoolsPromise,
+    questionSummaryPromise,
+    questionsPerDayPromise,
+    questionsPerScanPromise,
+    questionConversionPromise,
+    questionsBySchoolPromise,
+    latestQuestionsPromise,
+    mostScannedSchoolsPromise,
+    schoolCountersPromise,
+    b2bSummaryPromise,
+  ]);
+
+  const totals = totalsRes.rows[0];
+  const comparisons = comparisonsSummaryRes.rows[0];
+  const duration = durationSummaryRes.rows[0];
+  const questionSummary = questionSummaryRes.rows[0];
+  const b2b = b2bSummaryRes.rows[0];
+  const completedScans = totals?.completed_scans || 0;
+
+  return res.json({
+    generatedAt: new Date().toISOString(),
+    totals: {
+      totalScanRuns: totals?.total_scans || 0,
+      completedScans,
+      successfulScans: totals?.successful_scans || 0,
+      rejectedScans: totals?.rejected_scans || 0,
+      failedScans: totals?.failed_scans || 0,
+      uniqueSchoolsCrawled: uniqueSchoolsRes.rows[0]?.unique_schools_crawled || 0,
+      schoolsCrawledList: schoolsListRes.rows.map((r: { name: string; website_url: string; last_crawled_at: Date | null; }) => ({
+        name: r.name,
+        website: r.website_url,
+        lastCrawledAt: r.last_crawled_at ? new Date(r.last_crawled_at).toISOString() : null,
+      })),
+    },
+    crawlTime: {
+      averageMs: duration?.average_ms ?? null,
+      medianMs: duration?.median_ms ?? null,
+      p95Ms: duration?.p95_ms ?? null,
+      perDay: avgDurationByDayRes.rows.map((r: { day: string; average_ms: number; run_count: number; }) => ({
+        day: r.day,
+        averageMs: r.average_ms,
+        runCount: r.run_count,
+      })),
+      slowestSchools: slowestScansRes.rows.map((r: { session_id: string; school_name: string; url: string; completed_at: Date | null; duration_ms: number; }) => ({
+        sessionId: r.session_id,
+        schoolName: r.school_name,
+        url: r.url,
+        durationMs: r.duration_ms,
+        completedAt: r.completed_at ? new Date(r.completed_at).toISOString() : null,
+      })),
+    },
+    users: {
+      newUsers: null,
+      returningUsers: null,
+      note: 'New/returning users are not available yet because visitor_id tracking is not instrumented.',
+    },
+    comparisons: {
+      compareListsCreated: comparisons?.compare_lists_created || 0,
+      comparisonsDone: comparisons?.comparisons_done || 0,
+      schoolsAddedToCompare: comparisons?.schools_added_to_compare || 0,
+      mostComparedSchools: mostComparedSchoolsRes.rows.map((r: { school_name: string; website: string; compare_adds: number; }) => ({
+        schoolName: r.school_name,
+        website: r.website,
+        compareAdds: r.compare_adds,
+      })),
+    },
+    questions: {
+      totalQuestionsAsked: questionSummary?.total_questions_asked || 0,
+      questionsPerScan: Number(questionsPerScanRes.rows[0]?.questions_per_scan || 0),
+      completedScanQuestionRatePercent: Number(questionConversionRes.rows[0]?.percent || 0),
+      perDay: questionsPerDayRes.rows.map((r: { day: string; questions: number; }) => ({ day: r.day, questions: r.questions })),
+      bySchool: questionsBySchoolRes.rows.map((r: { school_name: string; website: string; total_questions: number; }) => ({
+        schoolName: r.school_name,
+        website: r.website,
+        totalQuestions: r.total_questions,
+      })),
+      latest: latestQuestionsRes.rows.map((r: { asked_at: Date; school_name: string; content: string; }) => ({
+        askedAt: new Date(r.asked_at).toISOString(),
+        schoolName: r.school_name,
+        question: r.content,
+      })),
+    },
+    popularity: {
+      mostScannedSchools: mostScannedSchoolsRes.rows.map((r: { school_name: string; website: string; scans: number; }) => ({
+        schoolName: r.school_name,
+        website: r.website,
+        scans: r.scans,
+      })),
+      topSchoolCounters: schoolCountersRes.rows.map((r: { name: string; website_url: string; view_count: number; compare_count: number; search_count: number; }) => ({
+        schoolName: r.name,
+        website: r.website_url,
+        viewCount: r.view_count,
+        compareCount: r.compare_count,
+        searchCount: r.search_count,
+      })),
+      countersReliabilityNote: 'view_count, compare_count, search_count are currently not instrumented in active server flows and should be treated as unreliable.',
+    },
+    b2b: {
+      totalCtaClicks: b2b?.total_clicks || 0,
+      uniqueCtaSessions: b2b?.unique_click_sessions || 0,
+      conversionPercent: completedScans > 0
+        ? Number((((b2b?.unique_click_sessions || 0) * 100) / completedScans).toFixed(2))
+        : 0,
+    },
+  });
+});
+
+/* ================================================================== */
 /*  Badge + Health                                                     */
 /* ================================================================== */
 
@@ -2080,6 +3535,7 @@ app.get('/api/health', async (_req, res) => {
       classify: process.env.CLASSIFY_QUEUE_NAME || 'schoollens-classify',
       crawl: process.env.CRAWLER_QUEUE_NAME || 'schoollens-crawl',
       score: process.env.SCORING_QUEUE_NAME || 'schoollens-score',
+      paidReport: process.env.PAID_REPORT_QUEUE_NAME || 'schoollens-paid-report',
     },
     storageProvider: process.env.STORAGE_PROVIDER || 's3',
   });

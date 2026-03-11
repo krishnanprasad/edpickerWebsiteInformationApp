@@ -161,6 +161,14 @@ export interface B2bInterestResponse {
   ctaUrl: string;
 }
 
+export interface CrawledSchoolOption {
+  name: string;
+  city: string | null;
+  state: string | null;
+  pincode: string | null;
+  websiteUrl: string;
+}
+
 /* ------------------------------------------------------------------ */
 /*  SSE streaming types (Crawler V2)                                   */
 /* ------------------------------------------------------------------ */
@@ -203,6 +211,30 @@ export interface RedFlag {
 export interface RedFlagsResponse {
   sessionId: string;
   flags: RedFlag[];
+  generatedAt: string;
+  fromCache: boolean;
+}
+
+export type SchoolInfoCoreStatus = 'missing' | 'partial' | 'weak_found' | 'strong_found';
+
+export interface SchoolInfoCoreCategory {
+  categoryNumber: number;
+  categoryName: string;
+  score: number; // 0..3
+  status: SchoolInfoCoreStatus;
+  reason: string;
+  evidence: string;
+}
+
+export interface SchoolInfoCoreResponse {
+  sessionId: string;
+  providerUsed: 'openai' | 'gemini' | 'none';
+  categories: SchoolInfoCoreCategory[];
+  totalScore: number;
+  maxScore: number;
+  percent: number;
+  label: string;
+  summary: string;
   generatedAt: string;
   fromCache: boolean;
 }

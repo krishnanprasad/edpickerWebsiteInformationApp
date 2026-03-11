@@ -1,8 +1,10 @@
-﻿import { Component, EventEmitter, Input, Output } from '@angular/core';
+﻿import { Component, EventEmitter, Input, OnDestroy, Output, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
-import { ScanStatus } from '../models/scan.models';
+import { Subscription } from 'rxjs';
+import { CrawledSchoolOption, ScanStatus } from '../models/scan.models';
+import { ScanService } from '../services/scan.service';
 import { normalizeSchoolUrl } from '../utils/url-normalizer';
 
 @Component({
@@ -49,9 +51,22 @@ import { normalizeSchoolUrl } from '../utils/url-normalizer';
               class="url-input"
               [(ngModel)]="city"
               placeholder="City or PIN code (e.g. Coimbatore, 641001)"
+              (ngModelChange)="onCityInputChange($event)"
               (keyup.enter)="onCitySearch()" />
           </div>
-          <button class="ghost-search-btn" (click)="onCitySearch()">Find Schools</button>
+          <button class="ghost-search-btn" (click)="onCitySearch()" [disabled]="cityLoading">Find Schools</button>
+        </div>
+        <div class="city-dropdown" *ngIf="showCityDropdown">
+          <div class="city-state" *ngIf="cityLoading">Searching crawled schools...</div>
+          <div class="city-state" *ngIf="!cityLoading && cityResults.length === 0">No crawled schools found for this query.</div>
+          <button
+            type="button"
+            class="city-option"
+            *ngFor="let school of cityResults"
+            (mousedown)="onSelectSchool(school)">
+            <span class="school-name">{{ school.name }}</span>
+            <span class="school-meta">{{ school.city || '-' }}, {{ school.state || '-' }}{{ school.pincode ? ' - ' + school.pincode : '' }}</span>
+          </button>
         </div>
 
         <div class="or-divider"><span>or paste a school URL directly</span></div>
@@ -235,6 +250,39 @@ import { normalizeSchoolUrl } from '../utils/url-normalizer';
     .city-row .url-input { color: #fff; }
     .city-row .url-input::placeholder { color: rgba(255,255,255,0.6); }
     .city-row .input-icon { color: rgba(255,255,255,0.7); }
+    .city-dropdown {
+      margin-top: 8px;
+      margin-bottom: 2px;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.32);
+      background: rgba(13, 71, 161, 0.92);
+      text-align: left;
+      max-height: 280px;
+      overflow-y: auto;
+    }
+    .city-state {
+      font-size: 13px;
+      color: rgba(255,255,255,0.88);
+      padding: 12px;
+    }
+    .city-option {
+      width: 100%;
+      text-align: left;
+      border: 0;
+      border-bottom: 1px solid rgba(255,255,255,0.12);
+      background: transparent;
+      color: #fff;
+      cursor: pointer;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .city-option:last-child { border-bottom: 0; }
+    .city-option:hover { background: rgba(255,255,255,0.12); }
+    .school-name { font-size: 14px; font-weight: 600; line-height: 1.3; }
+    .school-meta { font-size: 12px; color: rgba(255,255,255,0.75); line-height: 1.3; }
     .or-divider {
       display: flex;
       align-items: center;
@@ -358,7 +406,9 @@ import { normalizeSchoolUrl } from '../utils/url-normalizer';
     }
   `],
 })
-export class ScanInputComponent {
+export class ScanInputComponent implements OnDestroy {
+  private readonly scanService = inject(ScanService);
+
   @Input() compact = false;
   @Input() schoolName = '';
   @Input() board = '';
@@ -372,6 +422,13 @@ export class ScanInputComponent {
   scanning = false;
   error = '';
   showHow = false;
+  cityLoading = false;
+  cityResults: CrawledSchoolOption[] = [];
+  showCityDropdown = false;
+
+  private citySearchDebounce: number | null = null;
+  private citySearchSub: Subscription | null = null;
+  private cityRequestSerial = 0;
 
   steps = [
     { title: 'Paste the school website', desc: 'Enter any school\'s website address above.' },
@@ -433,8 +490,45 @@ export class ScanInputComponent {
   }
 
   onCitySearch() {
-    if (!this.city.trim()) return;
-    this.infoMessage = `City/PIN search coming soon. In the meantime, paste the school's website URL below.`;
+    const query = this.city.trim();
+    if (!query) {
+      this.showCityDropdown = false;
+      this.cityResults = [];
+      return;
+    }
+    this.lookupSchools(query);
+  }
+
+  onCityInputChange(value: string) {
+    this.city = value;
+    const query = value.trim();
+
+    if (this.citySearchDebounce !== null) {
+      window.clearTimeout(this.citySearchDebounce);
+      this.citySearchDebounce = null;
+    }
+
+    if (query.length < 2) {
+      this.cityLoading = false;
+      this.cityResults = [];
+      this.showCityDropdown = false;
+      return;
+    }
+
+    this.citySearchDebounce = window.setTimeout(() => {
+      this.lookupSchools(query);
+    }, 300);
+  }
+
+  onSelectSchool(school: CrawledSchoolOption) {
+    this.url = school.websiteUrl;
+    this.city = `${school.name}, ${school.city || '-'}, ${school.state || '-'}`;
+    this.cityResults = [];
+    this.showCityDropdown = false;
+    this.cityLoading = false;
+    this.infoMessage = `Selected ${school.name}. Starting scan from stored website URL.`;
+    this.error = '';
+    this.onScan();
   }
 
   onReset() {
@@ -443,6 +537,44 @@ export class ScanInputComponent {
     this.url = '';
     this.city = '';
     this.infoMessage = '';
+    this.cityLoading = false;
+    this.cityResults = [];
+    this.showCityDropdown = false;
     this.reset.emit();
   }
+
+  ngOnDestroy() {
+    if (this.citySearchDebounce !== null) {
+      window.clearTimeout(this.citySearchDebounce);
+      this.citySearchDebounce = null;
+    }
+    this.citySearchSub?.unsubscribe();
+    this.citySearchSub = null;
+  }
+
+  private lookupSchools(query: string) {
+    this.citySearchSub?.unsubscribe();
+    this.citySearchSub = null;
+    this.cityLoading = true;
+    this.showCityDropdown = true;
+    this.infoMessage = '';
+
+    const serial = ++this.cityRequestSerial;
+    this.citySearchSub = this.scanService.searchCrawledSchools(query).subscribe({
+      next: (res) => {
+        if (serial !== this.cityRequestSerial) return;
+        this.cityLoading = false;
+        this.cityResults = res.items || [];
+        this.showCityDropdown = true;
+      },
+      error: () => {
+        if (serial !== this.cityRequestSerial) return;
+        this.cityLoading = false;
+        this.cityResults = [];
+        this.showCityDropdown = false;
+        this.infoMessage = 'Could not load school suggestions right now. You can still paste URL directly.';
+      },
+    });
+  }
 }
+

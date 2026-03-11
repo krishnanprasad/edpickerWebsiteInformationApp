@@ -16,7 +16,8 @@
     "api:dev": "nx run api:dev",
     "api:build": "nx run api:build",
     "start:api": "tsx src/server.ts",
-    "start:worker": "tsx apps/crawler/src/worker.ts"
+    "start:worker": "tsx apps/crawler/src/worker.ts",
+    "crawl-all-website": "tsx src/crawl-all-website.ts"
   },
   "dependencies": {
     "@angular-devkit/build-angular": "^21.1.4",
@@ -61,6 +62,7 @@
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^22.10.2",
+    "@types/pg": "^8.18.0",
     "nx": "^20.3.3",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"

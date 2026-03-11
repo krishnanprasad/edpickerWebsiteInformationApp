@@ -1,7 +1,7 @@
 import { Injectable, inject, NgZone } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable, interval, switchMap, takeWhile, map, startWith } from 'rxjs';
-import { ScanResponse, AskResponse, B2bInterestResponse, ScanStatus, SSEEvent, SSEEventType, RedFlagsResponse } from '../models/scan.models';
+import { ScanResponse, AskResponse, B2bInterestResponse, ScanStatus, SSEEvent, SSEEventType, RedFlagsResponse, CrawledSchoolOption, SchoolInfoCoreResponse } from '../models/scan.models';
 import { CrashHandlerService } from './crash-handler.service';
 
 @Injectable({ providedIn: 'root' })
@@ -94,9 +94,19 @@ export class ScanService {
     return this.http.get<RedFlagsResponse>(`/api/scan/${sessionId}/red-flags`);
   }
 
+  /** Fetch 10-category School Information Core score (0-3 per category). */
+  getSchoolInfoCore(sessionId: string): Observable<SchoolInfoCoreResponse> {
+    return this.http.get<SchoolInfoCoreResponse>(`/api/scan/${sessionId}/school-info-core`);
+  }
+
   /** Track B2B CTA interest click. */
   trackB2bInterest(sessionId: string): Observable<B2bInterestResponse> {
     return this.http.post<B2bInterestResponse>('/api/b2b-interest', { sessionId });
+  }
+
+  /** Search already crawled schools from registry for picker autocomplete. */
+  searchCrawledSchools(query: string): Observable<{ items: CrawledSchoolOption[] }> {
+    return this.http.get<{ items: CrawledSchoolOption[] }>(`/api/schools/search?q=${encodeURIComponent(query)}`);
   }
 
   private isTerminal(status: ScanStatus): boolean {
